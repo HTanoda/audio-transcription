@@ -2,7 +2,7 @@
 Audio Transcription Tool
 音声ファイルを自動で文字起こしするGUIアプリケーション
 
-Copyright (c) 2025 Hiroki
+Copyright (c) 2025 Hiroki Tanoda
 Released under the MIT License
 """
 
