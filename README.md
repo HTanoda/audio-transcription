@@ -1,183 +1,191 @@
-# Audio Transcription Tool
+# TND AI議事録アプリ (audio-transcription)
 
-音声ファイルを自動で文字起こしするGUIアプリケーションです。
+会議の音声ファイルをAIが自動で文字起こしするアプリケーションです。
 
-## 特徴
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-* **対応フォーマット**: WAV, MP3, M4A, MP4
-* **高精度文字起こし**: faster-whisper (large-v3モデル) を使用
-* **自動分割処理**: 長い音声ファイルを1分ごとに分割して処理
-* **Excel出力**: 文字起こし結果をExcelファイル(.xlsx)に出力
-* **GUI対応**: tkinterによるシンプルなファイル選択インターフェース
-* **プログレスバー**: 処理状況をリアルタイムで表示（v1.2.0〜）
-* **自動フォルダ表示**: 処理完了後に出力フォルダを自動で開く（v1.2.0〜）
+---
 
-## 更新履歴
+## 📌 特徴
 
-### v1.2.0 (2026-01-27)
-- **新機能**: プログレスバーによる処理状況の可視化
-- **新機能**: 処理完了後に出力フォルダを自動で開く
-- **改善**: モデル読み込みをループ外に移動し、処理速度を大幅に向上
-- **改善**: GUIウィンドウのリサイズに対応
-- **修正**: UIフリーズを防ぐため、処理を別スレッドで実行
+- **かんたん操作** - ファイルを選んでボタンを押すだけ
+- **高精度な文字起こし** - 最新のAI音声認識モデル（Whisper large-v3）を使用
+- **Excel出力** - 文字起こし結果をExcelファイルで出力
+- **オフライン動作** - インターネット接続なしで使用可能
+- **プログレスバー** - 処理状況をリアルタイムで確認
 
-### v1.1.1 (2026-01-26)
-- 初回リリース
+---
 
-## 必要要件
+## 💻 動作環境
 
-* Python 3.10〜3.12（3.13以降は非推奨）
-* 約3GBの空きディスク容量（モデルファイル用）
+| 項目 | 要件 |
+|------|------|
+| OS | Windows 10 / 11 |
+| メモリ | 8GB以上推奨 |
+| ストレージ | 約4GBの空き容量 |
 
-## インストール
+---
+
+## 📥 インストール方法（一般ユーザー向け）
+
+### Step 1: ダウンロード
+
+[Releases](https://github.com/HTanoda/audio-transcription/releases) から最新版のZIPファイルをダウンロードします。
+
+### Step 2: ZIPファイルを展開
+
+ダウンロードした `TND_AudioTranscription_v1.2.1.zip` を右クリックし、「すべて展開」を選択します。
+
+### Step 3: セットアップを実行
+
+展開したフォルダ内の **`setup.exe`** をダブルクリックします。
+
+1. インストール先を確認します（通常は変更不要です）
+2. 「デスクトップにショートカットを作成」にチェックが入っていることを確認
+3. **「インストール」** ボタンをクリック
+4. モデルファイル（約3GB）のコピーに数分かかります
+
+### Step 4: 完了
+
+デスクトップに **「TND AI議事録アプリ」** のショートカットが作成されます。
+
+---
+
+## 🎯 使い方
+
+1. デスクトップの **「TND AI議事録アプリ」** アイコンをダブルクリック
+2. 「入力ファイル」の **「選択」** ボタンで音声ファイルを選択
+3. 「出力フォルダ」の **「選択」** ボタンで保存先を選択
+4. **「文字起こし開始」** ボタンをクリック
+5. 処理完了後、自動的に出力フォルダが開きます
+
+**対応フォーマット:** WAV, MP3, M4A, MP4
+
+**処理時間の目安:** 音声1分あたり約1〜3分（PCの性能により異なります）
+
+---
+
+## 📊 出力ファイル
+
+| ファイル | 内容 |
+|---------|------|
+| `○○_output.xlsx` | 文字起こし結果（Excel形式） |
+| `○○_0.wav` など | 分割された音声ファイル（1分ごと） |
+
+---
+
+## 🗑️ アンインストール方法
+
+### 方法1: Windowsの設定から（推奨）
+
+1. **「設定」** → **「アプリ」** → **「インストールされているアプリ」**
+2. 「TND AI議事録アプリ」を探す
+3. **「アンインストール」** をクリック
+
+### 方法2: アンインストーラーを直接実行
+
+インストールフォルダ内の `uninstall.exe` をダブルクリック
+
+---
+
+## 🔧 開発者向け情報
+
+### リポジトリ構成
+
+```
+audio-transcription/
+  ├── audio_transcription.py    # メインアプリケーション
+  ├── setup.py                  # インストーラー
+  ├── uninstall.py              # アンインストーラー
+  ├── requirements.txt          # 依存パッケージ
+  ├── BUILD_GUIDE.md            # ビルド手順書
+  ├── README.md                 # このファイル
+  ├── LICENSE                   # MITライセンス
+  └── THIRD_PARTY_LICENSES.txt  # サードパーティライセンス
+```
+
+### 開発環境のセットアップ
 
 ```bash
 # リポジトリをクローン
 git clone https://github.com/HTanoda/audio-transcription.git
 cd audio-transcription
 
-# 仮想環境を作成（推奨）
+# 仮想環境を作成
 python -m venv venv
-
-# 仮想環境を有効化
-# Windows (PowerShell)
-venv\Scripts\Activate.ps1
-# Windows (コマンドプロンプト)
-venv\Scripts\activate.bat
-# macOS/Linux
-source venv/bin/activate
+venv\Scripts\activate
 
 # 依存パッケージをインストール
 pip install -r requirements.txt
+
+# Whisperモデルをダウンロード（初回のみ、約3GB）
+python -c "from faster_whisper import WhisperModel; WhisperModel('large-v3', device='cpu', compute_type='int8', download_root='models')"
 ```
 
-## 使い方
+### 実行（開発時）
 
 ```bash
 python audio_transcription.py
 ```
 
-1. 起動するとGUIウィンドウが表示されます
-2. 「入力ファイル」の「選択」ボタンで音声ファイルを選択
-3. 「出力フォルダ」の「選択」ボタンで出力先フォルダを選択
-4. 「文字起こし開始」ボタンをクリック
-5. プログレスバーで処理状況を確認
-6. 処理完了後、自動で出力フォルダが開きます
+### ビルド
 
-## 出力形式
-
-Excelファイルには以下の列が含まれます：
-
-| No | 音声ファイル | 変換結果 |
-| --- | --- | --- |
-| 0 | ファイルパス（リンク付き） | 文字起こしテキスト |
-| 1 | ... | ... |
-
-## EXE化（配布用）
-
-PyInstallerを使用してスタンドアロンの実行ファイルを作成できます。
+詳細は [BUILD_GUIDE.md](BUILD_GUIDE.md) を参照してください。
 
 ```bash
-# PyInstallerをインストール
-pip install pyinstaller
-
-# モデルをダウンロード（初回のみ）
-python -c "from faster_whisper import WhisperModel; WhisperModel('large-v3', device='cpu', compute_type='int8', download_root='models')"
-
-# EXEをビルド
-pyinstaller --onefile \
-  --add-data "models;models" \
-  --add-data "venv\Lib\site-packages\onnxruntime;onnxruntime" \
-  --add-data "venv\Lib\site-packages\faster_whisper\vad.py;faster_whisper" \
-  --add-data "venv\Lib\site-packages\faster_whisper\assets\silero_vad_v6.onnx;faster_whisper\assets" \
-  --copy-metadata imageio \
-  --copy-metadata imageio-ffmpeg \
-  --noconsole \
-  --name "音声文字起こし" \
-  audio_transcription.py
+# メインアプリのビルド例
+pyinstaller --onefile --noconsole --icon "TND_AudioTranscription.ico" --name "TND_audio_transcription" audio_transcription.py
 ```
 
-生成されたEXEは `dist` フォルダに出力されます。
+---
 
-## 依存ライブラリ
+## 📝 更新履歴
 
-| ライブラリ | バージョン | 用途 | ライセンス |
-| --- | --- | --- | --- |
-| [faster-whisper](https://github.com/SYSTRAN/faster-whisper) | - | 音声認識 | MIT |
-| [moviepy](https://github.com/Zulko/moviepy) | 1.0.3 | 音声ファイル処理 | MIT |
-| [pandas](https://github.com/pandas-dev/pandas) | - | データ処理 | BSD-3-Clause |
-| [openpyxl](https://openpyxl.readthedocs.io/) | - | Excel出力 | MIT |
+### v1.2.1 (2025-02-03)
+- **新機能:** インストーラー/アンインストーラーを追加
+- **新機能:** モデル外部化による起動速度の改善
+- **改善:** アプリアイコンを追加
+- **改善:** 配布サイズの最適化（約2.8GB）
 
-> **注意**: moviepyは2.x系ではなく1.0.3を使用してください。2.x系では`moviepy.editor`が廃止されています。
+### v1.2.0
+- **新機能:** プログレスバーによる処理状況の可視化
+- **新機能:** 処理完了後に出力フォルダを自動で開く
+- **改善:** モデル読み込みをループ外に移動し処理速度大幅向上
+- **改善:** GUIウィンドウのリサイズ対応
+- **修正:** UIフリーズ防止のため別スレッド実行
 
-## 設定のカスタマイズ
+### v1.1.1
+- 初期リリース
 
-`audio_transcription.py` 内の以下の設定を変更できます：
+---
 
-```python
-# 分割間隔（秒）- デフォルト: 60秒
-split_interval = 1 * 60
+## ❓ よくある質問
 
-# Whisperモデル設定
-model = WhisperModel("large-v3", device="cpu", compute_type="int8")
+### Q: 初回起動時に時間がかかります
+**A:** 初回はAIモデルの読み込みに時間がかかります（30秒〜1分程度）。2回目以降は高速に起動します。
 
-# 初期プロンプト（認識精度向上のためのヒント）
-initial_prompt="高島宗一郎です。こんにちは、今日はよろしくお願いします。"
-```
+### Q: 「モデルフォルダが見つかりません」と表示されます
+**A:** アプリを再インストールしてください。
 
-### モデルサイズの変更
+### Q: 文字起こしの精度が低いです
+**A:** 以下の点をご確認ください：
+- 音声がクリアに録音されているか
+- 背景ノイズが大きくないか
+- 話者が複数同時に話していないか
 
-処理速度と精度のトレードオフに応じてモデルを変更できます：
+### Q: インターネット接続は必要ですか？
+**A:** いいえ、不要です。AIモデルはローカルにインストールされているため、オフラインで使用できます。
 
-| モデル | サイズ | 精度 | 速度 |
-| --- | --- | --- | --- |
-| tiny | 78.2MB | 低 | 超高速 |
-| base | 148MB | 低 | 高速 |
-| small | 486MB | バランス | バランス |
-| medium | 1.53GB | 高精度 | 少し遅い |
-| large-v3 | 3.09GB | 最高精度 | 遅い |
+---
 
-## GPU対応
-
-CUDAが利用可能な環境では、以下のように変更することでGPU処理が可能です：
-
-```python
-model = WhisperModel("large-v3", device="cuda", compute_type="float16")
-```
-
-## トラブルシューティング
-
-### `No module named 'moviepy.editor'` エラー
-
-moviepy 2.x がインストールされています。1.0.3にダウングレードしてください：
-
-```bash
-pip uninstall moviepy -y
-pip install moviepy==1.0.3
-```
-
-### PyInstallerでビルドしたEXEが起動しない
-
-コンソール付きでビルドしてエラーを確認してください：
-
-```bash
-# --noconsole を外してビルド
-pyinstaller --onefile ... audio_transcription.py
-```
-
-### Pythonバージョンの問題
-
-Python 3.13以降では依存パッケージのビルドに問題が発生する場合があります。Python 3.10〜3.12の使用を推奨します。
-
-## ライセンス
+## 📜 ライセンス
 
 このプロジェクトは [MIT License](LICENSE) の下で公開されています。
 
-## 貢献
+使用しているサードパーティライブラリのライセンスは [THIRD_PARTY_LICENSES.txt](THIRD_PARTY_LICENSES.txt) を参照してください。
 
-Issue や Pull Request を歓迎します。
+---
 
-## 謝辞
+## 📞 サポート
 
-* [OpenAI Whisper](https://github.com/openai/whisper) - 音声認識モデル
-* [SYSTRAN/faster-whisper](https://github.com/SYSTRAN/faster-whisper) - 高速推論実装
+問題が発生した場合や、ご要望がある場合は [Issues](https://github.com/HTanoda/audio-transcription/issues) までご連絡ください。

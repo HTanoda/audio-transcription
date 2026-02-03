@@ -10,16 +10,45 @@ from openpyxl.utils.dataframe import dataframe_to_rows
 import datetime
 import threading
 
+# アプリケーション情報
+APP_NAME = "TND_AudioTranscription"
+APP_VERSION = "1.2.1"
+APP_TITLE = f"TND audio_transcription v{APP_VERSION}"
+
+
+def get_app_dir():
+    """アプリケーションのインストールディレクトリを取得"""
+    if getattr(sys, 'frozen', False):
+        # PyInstallerでビルドされた場合、EXEのあるフォルダ
+        return os.path.dirname(sys.executable)
+    else:
+        # 開発時はスクリプトのあるフォルダ
+        return os.path.dirname(os.path.abspath(__file__))
+
+
 def resource_path(relative_path):
+    """リソースファイルのパスを取得（モデル外部化対応）"""
+    app_dir = get_app_dir()
+    
+    # EXEと同じフォルダを優先的に探す
+    external_path = os.path.join(app_dir, relative_path)
+    if os.path.exists(external_path):
+        return external_path
+    
+    # PyInstallerの一時フォルダ（フォールバック）
     if hasattr(sys, '_MEIPASS'):
-        return os.path.join(sys._MEIPASS, relative_path)
+        meipass_path = os.path.join(sys._MEIPASS, relative_path)
+        if os.path.exists(meipass_path):
+            return meipass_path
+    
+    # 開発時のパス
     return os.path.join(os.path.abspath("."), relative_path)
 
 
 class AudioTranscriptionApp:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("TND audio_transcription v1.2.0")
+        self.root.title(APP_TITLE)
         self.root.geometry("500x350")
         self.root.resizable(True, True)
         
@@ -27,7 +56,22 @@ class AudioTranscriptionApp:
         self.output_folder_path = None
         self.is_processing = False
         
+        # モデルの存在確認
+        self.check_model()
+        
         self.setup_ui()
+    
+    def check_model(self):
+        """モデルフォルダの存在確認"""
+        model_dir = resource_path("models")
+        if not os.path.exists(model_dir):
+            messagebox.showerror(
+                "エラー", 
+                f"モデルフォルダが見つかりません。\n\n"
+                f"期待されるパス:\n{model_dir}\n\n"
+                f"アプリケーションを再インストールしてください。"
+            )
+            sys.exit(1)
     
     def setup_ui(self):
         # メインフレーム
@@ -38,21 +82,21 @@ class AudioTranscriptionApp:
         file_frame = ttk.LabelFrame(main_frame, text="入力ファイル", padding="10")
         file_frame.pack(fill=tk.X, pady=(0, 10))
         
+        self.file_btn = ttk.Button(file_frame, text="選択", command=self.select_input_file)
+        self.file_btn.pack(side=tk.RIGHT, padx=(10, 0))
+        
         self.file_label = ttk.Label(file_frame, text="ファイルが選択されていません")
         self.file_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        
-        self.file_btn = ttk.Button(file_frame, text="選択", command=self.select_input_file)
-        self.file_btn.pack(side=tk.RIGHT)
         
         # 出力フォルダ選択
         folder_frame = ttk.LabelFrame(main_frame, text="出力フォルダ", padding="10")
         folder_frame.pack(fill=tk.X, pady=(0, 10))
         
+        self.folder_btn = ttk.Button(folder_frame, text="選択", command=self.select_output_folder)
+        self.folder_btn.pack(side=tk.RIGHT, padx=(10, 0))
+        
         self.folder_label = ttk.Label(folder_frame, text="フォルダが選択されていません")
         self.folder_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        
-        self.folder_btn = ttk.Button(folder_frame, text="選択", command=self.select_output_folder)
-        self.folder_btn.pack(side=tk.RIGHT)
         
         # プログレスバーフレーム
         progress_frame = ttk.LabelFrame(main_frame, text="処理状況", padding="10")
