@@ -1,6 +1,6 @@
-# ビルド手順書 (v1.2.1)
+# ビルド手順書 (v1.3.0)
 
-このドキュメントでは、音声文字起こしアプリ v1.2.1 の配布用パッケージをビルドする手順を説明します。
+このドキュメントでは、音声文字起こしアプリ v1.3.0 の配布用パッケージをビルドする手順を説明します。
 
 ## 前提条件
 
@@ -15,6 +15,7 @@ D:\whisper\
   ├── audio_transcription.py    # メインアプリ
   ├── setup.py                  # インストーラー
   ├── uninstall.py              # アンインストーラー
+  ├── TND_AudioTranscription01.ico  # アプリアイコン
   ├── models/                   # Whisperモデル（約3GB）
   └── new_env/                  # Python仮想環境
 ```
@@ -51,13 +52,14 @@ pyinstaller --onefile ^
   --copy-metadata imageio ^
   --copy-metadata imageio-ffmpeg ^
   --noconsole ^
+  --icon "TND_AudioTranscription01.ico" ^
   --name "TND_audio_transcription" ^
   audio_transcription.py
 ```
 
 **1行バージョン:**
 ```powershell
-pyinstaller --onefile --add-data "new_env\Lib\site-packages\onnxruntime;onnxruntime" --add-data "new_env\Lib\site-packages\faster_whisper\vad.py;faster_whisper" --add-data "new_env\Lib\site-packages\faster_whisper\assets\silero_vad_v6.onnx;faster_whisper\assets" --copy-metadata imageio --copy-metadata imageio-ffmpeg --noconsole --name "TND_audio_transcription" audio_transcription.py
+pyinstaller --onefile --add-data "new_env\Lib\site-packages\onnxruntime;onnxruntime" --add-data "new_env\Lib\site-packages\faster_whisper\vad.py;faster_whisper" --add-data "new_env\Lib\site-packages\faster_whisper\assets\silero_vad_v6.onnx;faster_whisper\assets" --copy-metadata imageio --copy-metadata imageio-ffmpeg --noconsole --icon "TND_AudioTranscription01.ico" --name "TND_audio_transcription" audio_transcription.py
 ```
 
 ### Step 4: インストーラーのビルド
@@ -76,59 +78,48 @@ pyinstaller --onefile --noconsole --name "uninstall" uninstall.py
 
 ```powershell
 # 配布用フォルダを作成
-New-Item -ItemType Directory -Path "dist\TND_AudioTranscription_v1.2.1" -Force
-New-Item -ItemType Directory -Path "dist\TND_AudioTranscription_v1.2.1\LICENSES" -Force
+New-Item -ItemType Directory -Path "dist\TND_AudioTranscription_v1.3.0" -Force
 
 # ファイルをコピー
-Copy-Item "dist\TND_audio_transcription.exe" "dist\TND_AudioTranscription_v1.2.1\"
-Copy-Item "dist\setup.exe" "dist\TND_AudioTranscription_v1.2.1\"
-Copy-Item "dist\uninstall.exe" "dist\TND_AudioTranscription_v1.2.1\"
+Copy-Item "dist\TND_audio_transcription.exe" "dist\TND_AudioTranscription_v1.3.0\"
+Copy-Item "dist\setup.exe" "dist\TND_AudioTranscription_v1.3.0\"
+Copy-Item "dist\uninstall.exe" "dist\TND_AudioTranscription_v1.3.0\"
 
 # modelsフォルダをコピー（シンボリックリンクが実体ファイルに変換される）
-Copy-Item -Recurse "models" "dist\TND_AudioTranscription_v1.2.1\"
+Copy-Item -Recurse "models" "dist\TND_AudioTranscription_v1.3.0\"
 
 # blobsフォルダを削除（snapshotsに実体があるので不要、サイズ半減）
-Remove-Item -Recurse -Force "dist\TND_AudioTranscription_v1.2.1\models\models--Systran--faster-whisper-large-v3\blobs"
+Remove-Item -Recurse -Force "dist\TND_AudioTranscription_v1.3.0\models\models--Systran--faster-whisper-large-v3\blobs"
 
-# ライセンスファイルをコピー
-Copy-Item "LICENSE.txt" "dist\TND_AudioTranscription_v1.2.1\LICENSES\"
-Copy-Item "THIRD_PARTY_LICENSES.txt" "dist\TND_AudioTranscription_v1.2.1\LICENSES\"
+# アイコンファイルをコピー
+Copy-Item "TND_AudioTranscription01.ico" "dist\TND_AudioTranscription_v1.3.0\"
 
 # README.txtをコピー（存在する場合）
-Copy-Item "README.txt" "dist\TND_AudioTranscription_v1.2.1\" -ErrorAction SilentlyContinue
-
-# アイコンファイルをコピー（存在する場合）
-Copy-Item "TND_AudioTranscription.ico" "dist\TND_AudioTranscription_v1.2.1\" -ErrorAction SilentlyContinue
+Copy-Item "README.txt" "dist\TND_AudioTranscription_v1.3.0\" -ErrorAction SilentlyContinue
 ```
 
 **サイズ確認（約2.8GBになっていることを確認）:**
 ```powershell
-(Get-ChildItem -Recurse "dist\TND_AudioTranscription_v1.2.1\models" | Measure-Object -Property Length -Sum).Sum / 1GB
-```
-
-### Step 7: ZIPファイルの作成
-
-```powershell
-Compress-Archive -Path "dist\TND_AudioTranscription_v1.2.1\*" -DestinationPath "dist\TND_AudioTranscription_v1.2.1.zip" -Force
+(Get-ChildItem -Recurse "dist\TND_AudioTranscription_v1.3.0\models" | Measure-Object -Property Length -Sum).Sum / 1GB
 ```
 
 ## 配布用パッケージの内容
 
 ```
-TND_AudioTranscription_v1.2.1.zip
-  ├── setup.exe                     # ← ユーザーはこれを実行
-  ├── TND_audio_transcription.exe   # メインアプリ
-  ├── uninstall.exe                 # アンインストーラー
-  ├── README.txt                    # ユーザー向け説明書
-  ├── LICENSES/                     # ライセンス情報
-  │     ├── LICENSE.txt
-  │     └── THIRD_PARTY_LICENSES.txt
-  └── models/                       # Whisperモデル（約3GB）
+TND_AudioTranscription_v1.3.0/
+  ├── setup.exe                       # ← ユーザーはこれを実行
+  ├── TND_audio_transcription.exe     # メインアプリ
+  ├── uninstall.exe                   # アンインストーラー
+  ├── TND_AudioTranscription01.ico    # アプリアイコン
+  ├── README.txt                      # ユーザー向け説明書（任意）
+  └── models/                         # Whisperモデル（約3GB）
 ```
+
+> **注:** ライセンス情報はアプリ内メニュー「ヘルプ」→「ライセンス情報」から確認できるため、配布パッケージには含めません。
 
 ## ユーザー向けインストール手順
 
-1. ZIPファイルを展開
+1. 配布フォルダを展開
 2. `setup.exe` をダブルクリック
 3. インストール先を確認（デフォルト: `C:\Users\<ユーザー名>\AppData\Local\TND_AudioTranscription`）
 4. 「インストール」ボタンをクリック

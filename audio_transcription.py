@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from faster_whisper import WhisperModel
@@ -12,8 +13,126 @@ import threading
 
 # アプリケーション情報
 APP_NAME = "TND_AudioTranscription"
-APP_VERSION = "1.2.1"
+APP_VERSION = "1.3.0"
 APP_TITLE = f"TND audio_transcription v{APP_VERSION}"
+APP_ICON_NAME = "TND_AudioTranscription01.ico"
+
+# 単語登録キャッシュファイル名
+HOTWORDS_FILE = "hotwords.json"
+# 単語登録の上限数（hotwords枠223トークンに安全に収まる範囲）
+MAX_HOTWORDS = 50
+
+# ライセンス情報（アプリ内表示用）
+LICENSE_TEXT = """\
+─────────────────────────────────────
+使用ライセンス情報
+
+■ audio_transcription
+MIT License
+Copyright (c) 2024 HIROKI TANODA(TND)
+
+本ソフトウェアおよび関連文書ファイル(以下「ソフトウェア」)のコピーを取得した
+すべての人に対し、ソフトウェアを無制限に扱うことを無償で許可します。これには、
+ソフトウェアのコピーを使用、複製、変更、結合、公開、頒布、サブライセンス、
+および/または販売する権利、並びにソフトウェアを提供する相手に同じことを
+許可する権利も無制限に含まれます。
+
+上記の著作権表示および本許諾表示を、ソフトウェアのすべてのコピーまたは
+重要な部分に記載するものとします。
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, \
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF \
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+
+■ Whisper Model (faster-whisper-large-v3)
+MIT License  https://huggingface.co/Systran/faster-whisper-large-v3
+
+■ faster-whisper
+MIT License  Copyright (c) 2023 SYSTRAN
+https://github.com/SYSTRAN/faster-whisper
+
+■ OpenAI Whisper (Model)
+MIT License  Copyright (c) 2022 OpenAI
+https://github.com/openai/whisper
+
+■ MoviePy
+MIT License  Copyright (c) 2015 Zulko
+https://github.com/Zulko/moviepy
+
+■ pandas
+BSD 3-Clause License  Copyright (c) 2008-2011, AQR Capital Management, LLC
+https://github.com/pandas-dev/pandas
+
+■ openpyxl
+MIT License  Copyright (c) 2010 openpyxl
+https://foss.heptapod.net/openpyxl/openpyxl
+
+■ CTranslate2
+MIT License  Copyright (c) 2019 OpenNMT
+https://github.com/OpenNMT/CTranslate2
+
+■ NumPy
+BSD 3-Clause License  Copyright (c) 2005-2024, NumPy Developers
+https://github.com/numpy/numpy
+
+■ PyAV (FFmpeg Python bindings)
+BSD 3-Clause License  Copyright (c) 2013, Mike Boers
+https://github.com/PyAV-Org/PyAV
+─────────────────────────────────────\
+"""
+
+# 単語登録機能ヘルプテキスト
+HOTWORDS_HELP_TEXT = """\
+単語登録（カスタム辞書）機能について
+
+■ 機能の概要
+一般的な辞書には載っていない専門用語、社内用語、プロジェクト名、\
+人名などをあらかじめ登録することで、AIによる文字起こしの誤変換を\
+減らすことができます。
+
+■ 登録数の目安と注意点
+・登録上限： 最大50単語まで
+・推奨登録数： 1回の会議につき 10〜20単語程度
+
+⚠️ 重要：登録のコツ
+単語を登録しすぎると、かえってAIが混乱し、関係のない会話まで\
+無理やり登録単語に変換してしまう（誤認識が増える）可能性があります。
+「どうしても間違えてほしくない重要な単語」に絞って登録するのが、\
+最もきれいに文字起こしをするコツです。
+
+■ 効果的な登録例
+・固有名詞： 「TNDツール」「〇〇商事」「田野田」
+・略語・業界用語： 「DX」「SaaS」「OJT」
+・同音異義語の区別： 「あうとるっく（Outlook）」
+  「きしょう（起床／気象）」など、文脈で間違えやすいもの\
+"""
+
+
+def get_hotwords_path():
+    """単語登録ファイルのパスを取得"""
+    app_dir = get_app_dir()
+    return os.path.join(app_dir, HOTWORDS_FILE)
+
+
+def load_hotwords():
+    """保存済みの単語リストを読み込む"""
+    path = get_hotwords_path()
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                return data
+        except (json.JSONDecodeError, IOError):
+            pass
+    return []
+
+
+def save_hotwords(words):
+    """単語リストをJSONファイルに保存する"""
+    path = get_hotwords_path()
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(words, f, ensure_ascii=False, indent=2)
 
 
 def get_app_dir():
@@ -49,30 +168,123 @@ class AudioTranscriptionApp:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title(APP_TITLE)
-        self.root.geometry("500x350")
+        self.root.geometry("500x560")
         self.root.resizable(True, True)
         
         self.input_file_path = None
         self.output_folder_path = None
         self.is_processing = False
-        
+        self.hotwords_list = load_hotwords()
+
+        # ウィンドウアイコンの設定
+        self.set_window_icon()
+
         # モデルの存在確認
         self.check_model()
-        
+
+        self.setup_menu()
         self.setup_ui()
+        self.populate_hotwords_listbox()
     
+    def set_window_icon(self):
+        """ウィンドウアイコンを設定"""
+        icon_path = os.path.join(get_app_dir(), APP_ICON_NAME)
+        if os.path.exists(icon_path):
+            try:
+                self.root.iconbitmap(icon_path)
+            except tk.TclError:
+                pass  # アイコン読み込み失敗時は無視
+
     def check_model(self):
         """モデルフォルダの存在確認"""
         model_dir = resource_path("models")
         if not os.path.exists(model_dir):
             messagebox.showerror(
-                "エラー", 
+                "エラー",
                 f"モデルフォルダが見つかりません。\n\n"
                 f"期待されるパス:\n{model_dir}\n\n"
                 f"アプリケーションを再インストールしてください。"
             )
             sys.exit(1)
-    
+
+    def setup_menu(self):
+        """メニューバーを作成"""
+        menubar = tk.Menu(self.root)
+        self.root.config(menu=menubar)
+
+        # ヘルプメニュー
+        help_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="ヘルプ", menu=help_menu)
+        help_menu.add_command(label="単語登録機能について", command=self.show_hotwords_help)
+        help_menu.add_separator()
+        help_menu.add_command(label="ライセンス情報", command=self.show_license_info)
+
+    def show_license_info(self):
+        """ライセンス情報ダイアログを表示"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("ライセンス情報")
+        dialog.geometry("560x450")
+        dialog.resizable(True, True)
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        # アイコンの設定
+        icon_path = os.path.join(get_app_dir(), APP_ICON_NAME)
+        if os.path.exists(icon_path):
+            try:
+                dialog.iconbitmap(icon_path)
+            except tk.TclError:
+                pass
+
+        frame = ttk.Frame(dialog, padding="10")
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        text_widget = tk.Text(frame, wrap=tk.WORD, font=("", 9))
+        text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=text_widget.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        text_widget.config(yscrollcommand=scrollbar.set)
+
+        text_widget.insert(tk.END, LICENSE_TEXT)
+        text_widget.config(state=tk.DISABLED)
+
+        close_btn = ttk.Button(dialog, text="閉じる", command=dialog.destroy)
+        close_btn.pack(pady=(0, 10))
+
+    def show_hotwords_help(self):
+        """単語登録機能ヘルプダイアログを表示"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("単語登録機能について")
+        dialog.geometry("500x420")
+        dialog.resizable(True, True)
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        # アイコンの設定
+        icon_path = os.path.join(get_app_dir(), APP_ICON_NAME)
+        if os.path.exists(icon_path):
+            try:
+                dialog.iconbitmap(icon_path)
+            except tk.TclError:
+                pass
+
+        frame = ttk.Frame(dialog, padding="10")
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        text_widget = tk.Text(frame, wrap=tk.WORD, font=("", 10))
+        text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=text_widget.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        text_widget.config(yscrollcommand=scrollbar.set)
+
+        text_widget.insert(tk.END, HOTWORDS_HELP_TEXT)
+        text_widget.config(state=tk.DISABLED)
+
+        close_btn = ttk.Button(dialog, text="閉じる", command=dialog.destroy)
+        close_btn.pack(pady=(0, 10))
+
     def setup_ui(self):
         # メインフレーム
         main_frame = ttk.Frame(self.root, padding="20")
@@ -111,6 +323,39 @@ class AudioTranscriptionApp:
         self.progress_detail = ttk.Label(progress_frame, text="")
         self.progress_detail.pack(fill=tk.X)
         
+        # 単語登録フレーム
+        hotwords_frame = ttk.LabelFrame(main_frame, text="単語登録（固有名詞・専門用語）", padding="10")
+        hotwords_frame.pack(fill=tk.X, pady=(0, 10))
+
+        # 入力行: テキスト入力 + 追加ボタン
+        input_row = ttk.Frame(hotwords_frame)
+        input_row.pack(fill=tk.X, pady=(0, 5))
+
+        self.hotword_entry = ttk.Entry(input_row)
+        self.hotword_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        self.hotword_entry.bind("<Return>", lambda e: self.add_hotword())
+
+        self.add_btn = ttk.Button(input_row, text="追加", width=6, command=self.add_hotword)
+        self.add_btn.pack(side=tk.LEFT, padx=(0, 5))
+
+        self.remove_btn = ttk.Button(input_row, text="削除", width=6, command=self.remove_hotword)
+        self.remove_btn.pack(side=tk.LEFT)
+
+        # 登録数カウンター
+        self.hotwords_count_label = ttk.Label(hotwords_frame, text=f"0 / {MAX_HOTWORDS} 件")
+        self.hotwords_count_label.pack(anchor=tk.E, pady=(0, 3))
+
+        # 登録済み単語リスト
+        list_row = ttk.Frame(hotwords_frame)
+        list_row.pack(fill=tk.X)
+
+        self.hotwords_listbox = tk.Listbox(list_row, height=4, selectmode=tk.EXTENDED)
+        self.hotwords_listbox.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        scrollbar = ttk.Scrollbar(list_row, orient=tk.VERTICAL, command=self.hotwords_listbox.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.hotwords_listbox.config(yscrollcommand=scrollbar.set)
+
         # 実行ボタン
         self.run_btn = ttk.Button(main_frame, text="文字起こし開始", command=self.start_processing)
         self.run_btn.pack(pady=10)
@@ -135,6 +380,59 @@ class AudioTranscriptionApp:
             display_path = folder_path if len(folder_path) < 50 else "..." + folder_path[-47:]
             self.folder_label.config(text=display_path)
     
+    def populate_hotwords_listbox(self):
+        """リストボックスに登録済み単語を表示"""
+        self.hotwords_listbox.delete(0, tk.END)
+        for word in self.hotwords_list:
+            self.hotwords_listbox.insert(tk.END, word)
+        self.update_hotwords_count()
+
+    def update_hotwords_count(self):
+        """登録数カウンターを更新"""
+        count = len(self.hotwords_list)
+        self.hotwords_count_label.config(text=f"{count} / {MAX_HOTWORDS} 件")
+
+    def add_hotword(self):
+        """単語を追加"""
+        word = self.hotword_entry.get().strip()
+        if not word:
+            return
+        if len(self.hotwords_list) >= MAX_HOTWORDS:
+            messagebox.showwarning(
+                "上限",
+                f"登録できる単語は最大{MAX_HOTWORDS}件です。\n"
+                f"不要な単語を削除してから追加してください。"
+            )
+            return
+        if word in self.hotwords_list:
+            messagebox.showinfo("情報", f"「{word}」は既に登録されています。")
+            return
+        self.hotwords_list.append(word)
+        save_hotwords(self.hotwords_list)
+        self.hotwords_listbox.insert(tk.END, word)
+        self.hotword_entry.delete(0, tk.END)
+        self.update_hotwords_count()
+
+    def remove_hotword(self):
+        """選択した単語を削除"""
+        selected = self.hotwords_listbox.curselection()
+        if not selected:
+            messagebox.showinfo("情報", "削除する単語を選択してください。")
+            return
+        # 逆順で削除（インデックスずれ防止）
+        for idx in reversed(selected):
+            word = self.hotwords_listbox.get(idx)
+            self.hotwords_list.remove(word)
+            self.hotwords_listbox.delete(idx)
+        save_hotwords(self.hotwords_list)
+        self.update_hotwords_count()
+
+    def get_hotwords_string(self):
+        """登録済み単語をhotwordsパラメータ用の文字列に変換"""
+        if not self.hotwords_list:
+            return None
+        return " ".join(self.hotwords_list)
+
     def update_progress(self, current, total, status_text, detail_text=""):
         """プログレスバーと状態表示を更新"""
         progress_value = (current / total) * 100 if total > 0 else 0
@@ -149,6 +447,9 @@ class AudioTranscriptionApp:
         self.file_btn.config(state=state)
         self.folder_btn.config(state=state)
         self.run_btn.config(state=state)
+        self.add_btn.config(state=state)
+        self.remove_btn.config(state=state)
+        self.hotword_entry.config(state=state)
     
     def start_processing(self):
         if not self.input_file_path:
@@ -253,12 +554,17 @@ class AudioTranscriptionApp:
                   datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
             # ★★★ モデルは既に読み込み済みなのでここでは使うだけ ★★★
-            segments, _ = model.transcribe(output_file, 
-                                           beam_size=5, 
-                                           language='ja', 
-                                           temperature=0, 
-                                           vad_filter=True, 
-                                           initial_prompt="高島宗一郎です。こんにちは、今日はよろしくお願いします。")
+            transcribe_params = dict(
+                beam_size=5,
+                language='ja',
+                temperature=0,
+                vad_filter=True,
+                initial_prompt="高島宗一郎です。こんにちは、今日はよろしくお願いします。",
+            )
+            hotwords_str = self.get_hotwords_string()
+            if hotwords_str:
+                transcribe_params["hotwords"] = hotwords_str
+            segments, _ = model.transcribe(output_file, **transcribe_params)
 
             transcription = ''
             for segment in segments:

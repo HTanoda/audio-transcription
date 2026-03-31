@@ -9,10 +9,10 @@ import threading
 # アプリケーション情報
 APP_NAME = "TND_AudioTranscription"
 APP_DISPLAY_NAME = "TND AI議事録アプリ"
-APP_VERSION = "1.2.1"
+APP_VERSION = "1.3.0"
 APP_EXE_NAME = "TND_audio_transcription.exe"
 UNINSTALLER_NAME = "uninstall.exe"
-APP_ICON_NAME = "TND_AudioTranscription.ico"
+APP_ICON_NAME = "TND_AudioTranscription01.ico"
 
 
 def get_default_install_dir():
@@ -207,15 +207,6 @@ class InstallerApp:
             src_uninstaller = os.path.join(source_dir, UNINSTALLER_NAME)
             if os.path.exists(src_uninstaller):
                 shutil.copy2(src_uninstaller, install_dir)
-            
-            # LICENSESフォルダをコピー
-            self.root.after(0, lambda: self.update_progress(27, "ライセンス情報をコピー中..."))
-            src_licenses = os.path.join(source_dir, "LICENSES")
-            dst_licenses = os.path.join(install_dir, "LICENSES")
-            if os.path.exists(src_licenses):
-                if os.path.exists(dst_licenses):
-                    shutil.rmtree(dst_licenses)
-                shutil.copytree(src_licenses, dst_licenses)
             
             # README.txtをコピー（存在する場合）
             src_readme = os.path.join(source_dir, "README.txt")
