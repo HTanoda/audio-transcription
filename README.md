@@ -29,17 +29,27 @@
 
 ## 📥 インストール方法（一般ユーザー向け）
 
-### Step 1: ダウンロード
+> ⚠️ **配布用ZIPはGitHubでは配布していません**
+>
+> 本アプリはWhisper large-v3モデル（約3GB）を同梱するため、ビルド済みZIPの合計サイズが約3GBとなり、GitHubのファイルサイズ上限を超えるため公開できません。
+> お手数ですが、下記の手順に従ってご自身の環境でビルドしてご利用ください。
 
-[Releases](https://github.com/HTanoda/audio-transcription/releases) から最新版のZIPファイルをダウンロードします。
+### Step 1: リポジトリを取得
 
-### Step 2: ZIPファイルを展開
+このリポジトリをクローン（または ZIP ダウンロード）します。
 
-ダウンロードした `TND_AudioTranscription_v1.3.0.zip` を右クリックし、「すべて展開」を選択します。
+```bash
+git clone https://github.com/HTanoda/audio-transcription.git
+cd audio-transcription
+```
+
+### Step 2: ビルド
+
+[BUILD_GUIDE.md](BUILD_GUIDE.md) の手順に沿って、Python仮想環境の構築・依存パッケージのインストール・Whisperモデル（約3GB）のダウンロード・PyInstallerによる実行ファイル生成までを実施します。
 
 ### Step 3: セットアップを実行
 
-展開したフォルダ内の **`setup.exe`** をダブルクリックします。
+ビルド成果物フォルダ内の **`setup.exe`** をダブルクリックします。
 
 1. インストール先を確認します（通常は変更不要です）
 2. 「デスクトップにショートカットを作成」にチェックが入っていることを確認
