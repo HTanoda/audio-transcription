@@ -1,5 +1,4 @@
 faster-whisper
-moviepy==1.0.3
-pandas
+av
 openpyxl
 pyinstaller

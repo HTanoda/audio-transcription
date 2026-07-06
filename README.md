@@ -9,11 +9,15 @@
 ## 📌 特徴
 
 - **かんたん操作** - ファイルを選んでボタンを押すだけ
-- **高精度な文字起こし** - 最新のAI音声認識モデル（Whisper large-v3）を使用
+- **高精度な文字起こし** - 最新のAI音声認識モデル（Whisper large-v3）を使用。音声全体を1回で解析するため、文の途中で切れる誤認識が発生しにくい
+- **複数ファイルの一括処理** - 複数の音声ファイルをまとめて処理可能
 - **単語登録（カスタム辞書）** - 固有名詞や専門用語を登録して誤変換を軽減
-- **Excel出力** - 文字起こし結果をExcelファイルで出力
+- **Excel出力** - 文字起こし結果をExcelファイルで出力。時間帯セルから該当区間の分割音声をワンクリックで再生可能
+- **テキスト/字幕出力** - テキスト(.txt)・字幕(.srt)形式での出力にも対応
+- **キャンセルボタン** - 処理の途中で中断可能
 - **オフライン動作** - インターネット接続なしで使用可能
 - **プログレスバー** - 処理状況をリアルタイムで確認
+- **Turbo版あり** - 高速モデル（large-v3-turbo）を採用した「Turbo版」もビルド可能。標準版と併存インストール可能（詳細は下記「Turbo版について」を参照）
 
 ---
 
@@ -82,7 +86,18 @@ cd audio-transcription
 | ファイル | 内容 |
 |---------|------|
 | `○○_output.xlsx` | 文字起こし結果（Excel形式） |
-| `○○_0.wav` など | 分割された音声ファイル（1分ごと） |
+| `○○_分割音声/` | 再生用に切り出された分割音声（1分区間ごと、既定でON） |
+| `○○.txt` | テキスト形式の文字起こし結果（任意） |
+| `○○.srt` | 字幕形式の文字起こし結果（任意） |
+
+### Excel出力の列構成
+
+| 列 | 内容 |
+|----|------|
+| No | 連番 |
+| 時間帯 | 該当区間の開始〜終了時刻 |
+| 音声ファイル | 分割音声へのハイパーリンク（クリックでその区間を頭出し再生） |
+| 変換結果 | 文字起こしテキスト |
 
 ---
 
@@ -100,20 +115,42 @@ cd audio-transcription
 
 ---
 
+## ⚡ Turbo版について
+
+標準版に加えて、高速モデル（`large-v3-turbo`）を採用した **Turbo版** をビルドできます。
+
+| 項目 | 標準版 | Turbo版 |
+|------|--------|---------|
+| モデル | Whisper large-v3 | Whisper large-v3-turbo |
+| 速度 | 基準 | 標準版の数倍高速 |
+| モデルサイズ | 約3GB | 約1.5GB |
+| 日本語の精度 | 高精度 | 標準版とほぼ同等（最高精度優先なら標準版を推奨） |
+| 表示名 | TND AI議事録アプリ | TND AI議事録アプリ (Turbo版) |
+
+- Turbo版は標準版と**同一PCに併存インストール可能**です（インストール先・レジストリキー・表示名・本体EXE名をそれぞれ分離しています）。
+- Turbo版の本体EXE名は `TND_audio_transcription_turbo.exe`、インストール先は既定で `...\TND_AudioTranscription_turbo` です。
+- 使い方・出力ファイル形式は標準版と同じです。
+- Turbo版のビルド手順は [BUILD_GUIDE.md](BUILD_GUIDE.md) の「Turbo版のビルド」節を参照してください。
+
+---
+
 ## 🔧 開発者向け情報
 
 ### リポジトリ構成
 
 ```
 audio-transcription/
-  ├── audio_transcription.py    # メインアプリケーション
-  ├── setup.py                  # インストーラー
-  ├── uninstall.py              # アンインストーラー
-  ├── requirements.txt          # 依存パッケージ
-  ├── BUILD_GUIDE.md            # ビルド手順書
-  ├── README.md                 # このファイル
-  ├── LICENSE                   # MITライセンス
-  └── THIRD_PARTY_LICENSES.txt  # サードパーティライセンス
+  ├── audio_transcription.py        # メインアプリケーション（標準版）
+  ├── audio_transcription_turbo.py  # Turbo版ラッパー（標準版ソースをimport）
+  ├── setup.py                      # インストーラー（標準版）
+  ├── setup_turbo.py                # インストーラー（Turbo版）
+  ├── uninstall.py                  # アンインストーラー（標準版）
+  ├── uninstall_turbo.py            # アンインストーラー（Turbo版）
+  ├── requirements.txt              # 依存パッケージ
+  ├── BUILD_GUIDE.md                # ビルド手順書
+  ├── README.md                     # このファイル
+  ├── LICENSE                       # MITライセンス
+  └── THIRD_PARTY_LICENSES.txt      # サードパーティライセンス
 ```
 
 ### 開発環境のセットアップ
@@ -132,6 +169,9 @@ pip install -r requirements.txt
 
 # Whisperモデルをダウンロード（初回のみ、約3GB）
 python -c "from faster_whisper import WhisperModel; WhisperModel('large-v3', device='cpu', compute_type='int8', download_root='models')"
+
+# Turbo版をビルドする場合の高速モデル（約1.5GB）
+python -c "from faster_whisper import WhisperModel; WhisperModel('large-v3-turbo', device='cpu', compute_type='int8', download_root='models_turbo')"
 ```
 
 ### 実行（開発時）
@@ -152,6 +192,14 @@ pyinstaller --onefile --noconsole --icon "TND_AudioTranscription01.ico" --name "
 ---
 
 ## 📝 更新履歴
+
+### v1.4.0 (2026-07-06)
+- **改善:** 音声全体を1回で解析する方式に変更（精度・速度向上、文の途中での誤認識を解消）
+- **改善:** Excel出力を4列構成（No / 時間帯 / 音声ファイル / 変換結果）に変更、時間帯区間の分割音声をハイパーリンクから再生可能に
+- **新機能:** 分割音声を専用サブフォルダにまとめて出力（PyAVによる無劣化切り出し）
+- **新機能:** 複数ファイルの一括処理、キャンセルボタン、テキスト/字幕(SRT)出力、上書き確認、ログ出力を追加
+- **改善:** 依存ライブラリから moviepy・pandas を除去
+- **新機能:** 高速モデル large-v3-turbo を採用した Turbo版を追加（標準版と併存インストール可能）
 
 ### v1.3.0 (2025-02-24)
 - **新機能:** 単語登録（カスタム辞書）機能を追加 — 固有名詞や専門用語を登録して誤変換を軽減

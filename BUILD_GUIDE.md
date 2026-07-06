@@ -1,6 +1,6 @@
-# ビルド手順書 (v1.3.0)
+# ビルド手順書 (v1.4.0)
 
-このドキュメントでは、音声文字起こしアプリ v1.3.0 の配布用パッケージをビルドする手順を説明します。
+このドキュメントでは、音声文字起こしアプリ v1.4.0 の配布用パッケージをビルドする手順を説明します。
 
 ## 前提条件
 
@@ -49,8 +49,6 @@ pyinstaller --onefile ^
   --add-data "new_env\Lib\site-packages\onnxruntime;onnxruntime" ^
   --add-data "new_env\Lib\site-packages\faster_whisper\vad.py;faster_whisper" ^
   --add-data "new_env\Lib\site-packages\faster_whisper\assets\silero_vad_v6.onnx;faster_whisper\assets" ^
-  --copy-metadata imageio ^
-  --copy-metadata imageio-ffmpeg ^
   --noconsole ^
   --icon "TND_AudioTranscription01.ico" ^
   --name "TND_audio_transcription" ^
@@ -59,7 +57,7 @@ pyinstaller --onefile ^
 
 **1行バージョン:**
 ```powershell
-pyinstaller --onefile --add-data "new_env\Lib\site-packages\onnxruntime;onnxruntime" --add-data "new_env\Lib\site-packages\faster_whisper\vad.py;faster_whisper" --add-data "new_env\Lib\site-packages\faster_whisper\assets\silero_vad_v6.onnx;faster_whisper\assets" --copy-metadata imageio --copy-metadata imageio-ffmpeg --noconsole --icon "TND_AudioTranscription01.ico" --name "TND_audio_transcription" audio_transcription.py
+pyinstaller --onefile --add-data "new_env\Lib\site-packages\onnxruntime;onnxruntime" --add-data "new_env\Lib\site-packages\faster_whisper\vad.py;faster_whisper" --add-data "new_env\Lib\site-packages\faster_whisper\assets\silero_vad_v6.onnx;faster_whisper\assets" --noconsole --icon "TND_AudioTranscription01.ico" --name "TND_audio_transcription" audio_transcription.py
 ```
 
 ### Step 4: インストーラーのビルド
@@ -78,35 +76,35 @@ pyinstaller --onefile --noconsole --name "uninstall" uninstall.py
 
 ```powershell
 # 配布用フォルダを作成
-New-Item -ItemType Directory -Path "dist\TND_AudioTranscription_v1.3.0" -Force
+New-Item -ItemType Directory -Path "dist\TND_AudioTranscription_v1.4.0" -Force
 
 # ファイルをコピー
-Copy-Item "dist\TND_audio_transcription.exe" "dist\TND_AudioTranscription_v1.3.0\"
-Copy-Item "dist\setup.exe" "dist\TND_AudioTranscription_v1.3.0\"
-Copy-Item "dist\uninstall.exe" "dist\TND_AudioTranscription_v1.3.0\"
+Copy-Item "dist\TND_audio_transcription.exe" "dist\TND_AudioTranscription_v1.4.0\"
+Copy-Item "dist\setup.exe" "dist\TND_AudioTranscription_v1.4.0\"
+Copy-Item "dist\uninstall.exe" "dist\TND_AudioTranscription_v1.4.0\"
 
 # modelsフォルダをコピー（シンボリックリンクが実体ファイルに変換される）
-Copy-Item -Recurse "models" "dist\TND_AudioTranscription_v1.3.0\"
+Copy-Item -Recurse "models" "dist\TND_AudioTranscription_v1.4.0\"
 
 # blobsフォルダを削除（snapshotsに実体があるので不要、サイズ半減）
-Remove-Item -Recurse -Force "dist\TND_AudioTranscription_v1.3.0\models\models--Systran--faster-whisper-large-v3\blobs"
+Remove-Item -Recurse -Force "dist\TND_AudioTranscription_v1.4.0\models\models--Systran--faster-whisper-large-v3\blobs"
 
 # アイコンファイルをコピー
-Copy-Item "TND_AudioTranscription01.ico" "dist\TND_AudioTranscription_v1.3.0\"
+Copy-Item "TND_AudioTranscription01.ico" "dist\TND_AudioTranscription_v1.4.0\"
 
 # README.txtをコピー（存在する場合）
-Copy-Item "README.txt" "dist\TND_AudioTranscription_v1.3.0\" -ErrorAction SilentlyContinue
+Copy-Item "README.txt" "dist\TND_AudioTranscription_v1.4.0\" -ErrorAction SilentlyContinue
 ```
 
 **サイズ確認（約2.8GBになっていることを確認）:**
 ```powershell
-(Get-ChildItem -Recurse "dist\TND_AudioTranscription_v1.3.0\models" | Measure-Object -Property Length -Sum).Sum / 1GB
+(Get-ChildItem -Recurse "dist\TND_AudioTranscription_v1.4.0\models" | Measure-Object -Property Length -Sum).Sum / 1GB
 ```
 
 ## 配布用パッケージの内容
 
 ```
-TND_AudioTranscription_v1.3.0/
+TND_AudioTranscription_v1.4.0/
   ├── setup.exe                       # ← ユーザーはこれを実行
   ├── TND_audio_transcription.exe     # メインアプリ
   ├── uninstall.exe                   # アンインストーラー
@@ -156,11 +154,77 @@ dir new_env\Lib\site-packages\faster_whisper\assets\
 pyinstaller --onefile ... --name "TND_audio_transcription_debug" audio_transcription.py
 ```
 
-### moviepy関連のエラー
+## Turbo版のビルド
 
-moviepy 1.0.3を使用してください：
+Turbo版は標準版のソース（`audio_transcription.py` / `setup.py` / `uninstall.py`）を
+そのままimportし、識別子（インストール先・レジストリキー・表示名・EXE名）と
+ライセンス表記のみ差し替える薄いラッパー（`audio_transcription_turbo.py` /
+`setup_turbo.py` / `uninstall_turbo.py`）として実装されています。そのため、
+標準版と同じ同梱データ（onnxruntime、faster_whisperのVAD関連ファイル）が必要です。
+
+### Step 1: Turbo版モデルの取得
 
 ```powershell
-pip uninstall moviepy -y
-pip install moviepy==1.0.3
+python -c "from faster_whisper import WhisperModel; WhisperModel('large-v3-turbo', device='cpu', compute_type='int8', download_root='models_turbo')"
 ```
+
+### Step 2: Turbo版EXEのビルド
+
+ラッパーが標準版ソースをimportするだけのため、`--add-data` は標準版と同じ群を指定します。
+
+```powershell
+pyinstaller --onefile ^
+  --add-data "new_env\Lib\site-packages\onnxruntime;onnxruntime" ^
+  --add-data "new_env\Lib\site-packages\faster_whisper\vad.py;faster_whisper" ^
+  --add-data "new_env\Lib\site-packages\faster_whisper\assets\silero_vad_v6.onnx;faster_whisper\assets" ^
+  --noconsole ^
+  --icon "TND_AudioTranscription01.ico" ^
+  --name "TND_audio_transcription_turbo" ^
+  audio_transcription_turbo.py
+```
+
+```powershell
+pyinstaller --onefile --noconsole --name "setup_turbo" setup_turbo.py
+```
+
+```powershell
+pyinstaller --onefile --noconsole --name "uninstall_turbo" uninstall_turbo.py
+```
+
+### Step 3: 配布用フォルダの作成
+
+```powershell
+New-Item -ItemType Directory -Path "dist\TND_AudioTranscription_turbo_v1.4.0" -Force
+
+Copy-Item "dist\TND_audio_transcription_turbo.exe" "dist\TND_AudioTranscription_turbo_v1.4.0\"
+Copy-Item "dist\setup_turbo.exe" "dist\TND_AudioTranscription_turbo_v1.4.0\setup.exe"
+Copy-Item "dist\uninstall_turbo.exe" "dist\TND_AudioTranscription_turbo_v1.4.0\uninstall.exe"
+
+# models_turboフォルダを models としてコピー
+Copy-Item -Recurse "models_turbo" "dist\TND_AudioTranscription_turbo_v1.4.0\models"
+
+# blobsフォルダを削除（snapshotsに実体があるので不要）
+Remove-Item -Recurse -Force "dist\TND_AudioTranscription_turbo_v1.4.0\models\models--mobiuslabsgmbh--faster-whisper-large-v3-turbo\blobs"
+
+Copy-Item "TND_AudioTranscription01.ico" "dist\TND_AudioTranscription_turbo_v1.4.0\"
+Copy-Item "README.txt" "dist\TND_AudioTranscription_turbo_v1.4.0\" -ErrorAction SilentlyContinue
+```
+
+### 配布フォルダ構成
+
+```
+TND_AudioTranscription_turbo_v1.4.0/
+  ├── setup.exe                             # ← ユーザーはこれを実行（Turbo版インストーラー）
+  ├── TND_audio_transcription_turbo.exe     # Turbo版メインアプリ
+  ├── uninstall.exe                         # Turbo版アンインストーラー
+  ├── TND_AudioTranscription01.ico          # アプリアイコン
+  ├── README.txt                            # ユーザー向け説明書（任意）
+  └── models/                               # Whisper large-v3-turbo モデル（約1.5GB）
+```
+
+### 標準版との併存の仕組み
+
+`audio_transcription_turbo.py` / `setup_turbo.py` は標準版モジュールをimportした後、
+`APP_NAME`（インストール先フォルダ名・レジストリキーに使用）、`APP_DISPLAY_NAME`
+（表示名）、`APP_EXE_NAME`（本体EXE名）を turbo 用の値に上書きするだけで、
+標準版と衝突せず同一PCに併存インストールできるようにしています。
