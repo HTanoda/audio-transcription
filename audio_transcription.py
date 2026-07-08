@@ -3,6 +3,12 @@ import re
 import sys
 import json
 import logging
+
+# オフライン専用アプリのため、モデル読込時に一切ネットワークへ出ないよう強制する。
+# faster_whisper / huggingface_hub のインポート前に設定する必要がある。
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from faster_whisper import WhisperModel
@@ -14,7 +20,7 @@ import av
 
 # アプリケーション情報
 APP_NAME = "TND_AudioTranscription"
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.4.1"
 APP_TITLE = f"TND audio_transcription v{APP_VERSION}"
 APP_ICON_NAME = "TND_AudioTranscription01.ico"
 
@@ -232,6 +238,46 @@ def detect_models():
     return names
 
 
+def resolve_local_model_path(model_name):
+    """指定モデルのローカルスナップショットフォルダのパスを返す（無効／不在なら None）。
+
+    HuggingFace の名前解決やネットワークアクセスを一切介さず、同梱済みモデルの
+    実ファイルがあるフォルダを直接特定する。model.bin の存在まで確認するため、
+    不完全なインストールも None として検出できる。
+    """
+    model_dir = resource_path("models")
+    if not os.path.isdir(model_dir):
+        return None
+    for entry in sorted(os.listdir(model_dir)):
+        full_path = os.path.join(model_dir, entry)
+        if not os.path.isdir(full_path):
+            continue
+        m = re.match(r"^models--[^-]+(?:-[^-]+)*--faster-whisper-(.+)$", entry)
+        if not m or m.group(1) != model_name:
+            continue
+        snapshots = os.path.join(full_path, "snapshots")
+        if not os.path.isdir(snapshots):
+            return None
+        candidates = []
+        ref = os.path.join(full_path, "refs", "main")
+        if os.path.isfile(ref):
+            try:
+                with open(ref, "r", encoding="utf-8") as f:
+                    candidates.append(os.path.join(snapshots, f.read().strip()))
+            except OSError:
+                pass
+        candidates.extend(
+            os.path.join(snapshots, d)
+            for d in sorted(os.listdir(snapshots))
+            if os.path.isdir(os.path.join(snapshots, d))
+        )
+        for cand in candidates:
+            if os.path.isdir(cand) and os.path.isfile(os.path.join(cand, "model.bin")):
+                return cand
+        return None
+    return None
+
+
 def get_app_dir():
     """アプリケーションのインストールディレクトリを取得"""
     if getattr(sys, 'frozen', False):
@@ -317,7 +363,7 @@ class AudioTranscriptionApp:
                 pass  # アイコン読み込み失敗時は無視
 
     def check_model(self):
-        """モデルフォルダの存在確認"""
+        """モデルの存在確認（フォルダの有無だけでなく、有効なモデル実体まで検証する）"""
         model_dir = resource_path("models")
         if not os.path.exists(model_dir):
             messagebox.showerror(
@@ -325,6 +371,18 @@ class AudioTranscriptionApp:
                 f"モデルフォルダが見つかりません。\n\n"
                 f"期待されるパス:\n{model_dir}\n\n"
                 f"アプリケーションを再インストールしてください。"
+            )
+            sys.exit(1)
+        # 有効なモデル（model.bin まで揃ったスナップショット）が存在するか確認。
+        # 不完全なインストールをここで検知し、実行時のネットワークダウンロード試行を防ぐ。
+        if resolve_local_model_path(self.selected_model_name) is None:
+            messagebox.showerror(
+                "エラー",
+                f"利用可能なモデルが見つかりません。\n\n"
+                f"モデルフォルダ:\n{model_dir}\n\n"
+                f"ZIPを展開せずにセットアップした場合や、モデルファイル "
+                f"(約1.5〜3GB) のコピーが完了していない場合に発生します。\n"
+                f"ZIPを完全に展開したうえで、アプリケーションを再インストールしてください。"
             )
             sys.exit(1)
 
@@ -691,9 +749,15 @@ class AudioTranscriptionApp:
                     if model is None:
                         self.root.after(0, lambda: self.update_progress(
                             0, 100, "モデルを読み込み中...", "初回は時間がかかる場合があります"))
+                        # 同梱モデルのローカルパスを直接指定して読み込む（ネットワークに出ない）。
+                        model_path = resolve_local_model_path(self.selected_model_name)
+                        if model_path is None:
+                            raise RuntimeError(
+                                "モデルが見つかりません。アプリケーションを再インストールしてください。"
+                            )
                         model = WhisperModel(
-                            self.selected_model_name, device="cpu",
-                            compute_type="int8", download_root=resource_path("models")
+                            model_path, device="cpu",
+                            compute_type="int8", local_files_only=True
                         )
                     self.transcribe_file(
                         model, file_path, self.output_folder_path,
