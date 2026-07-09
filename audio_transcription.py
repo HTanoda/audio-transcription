@@ -20,7 +20,7 @@ import av
 
 # アプリケーション情報
 APP_NAME = "TND_AudioTranscription"
-APP_VERSION = "1.4.1"
+APP_VERSION = "1.4.2"
 APP_TITLE = f"TND audio_transcription v{APP_VERSION}"
 APP_ICON_NAME = "TND_AudioTranscription01.ico"
 
@@ -827,13 +827,21 @@ class AudioTranscriptionApp:
         transcribe_params = dict(
             beam_size=5,
             language='ja',
-            temperature=0,
             vad_filter=True,
             initial_prompt=INITIAL_PROMPT,
+            # 音質の悪い音源で一度誤認識（幻覚）が起きると、直前の出力を文脈として
+            # 引き継ぐ仕組みにより残り全体へ連鎖するため無効化する。
+            # v1.3の「1分ごとの独立認識」が持っていたリセット効果に相当。
+            # temperature は既定のフォールバック（失敗時に温度を上げて再試行）を使う。
+            condition_on_previous_text=False,
         )
+        # hotwords は30秒ごとの認識窓すべてのプロンプトに注入されるため、
+        # 句読点誘導文を載せることで全区間に句読点が付くようにする
+        # （initial_prompt は先頭の窓にしか効かない）。ユーザー登録単語も併記する。
         hotwords_str = self.get_hotwords_string()
-        if hotwords_str:
-            transcribe_params["hotwords"] = hotwords_str
+        transcribe_params["hotwords"] = (
+            f"{INITIAL_PROMPT} {hotwords_str}" if hotwords_str else INITIAL_PROMPT
+        )
 
         # ファイル全体を1回で文字起こしし、タイムスタンプで1分単位にまとめる
         # （物理分割しないため文の途中で切れず、再エンコードによる劣化もない）

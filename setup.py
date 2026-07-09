@@ -9,7 +9,7 @@ import threading
 # アプリケーション情報
 APP_NAME = "TND_AudioTranscription"
 APP_DISPLAY_NAME = "TND AI議事録アプリ"
-APP_VERSION = "1.4.1"
+APP_VERSION = "1.4.2"
 APP_EXE_NAME = "TND_audio_transcription.exe"
 UNINSTALLER_NAME = "uninstall.exe"
 APP_ICON_NAME = "TND_AudioTranscription01.ico"
