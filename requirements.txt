@@ -1,4 +1,5 @@
 faster-whisper
 av
 openpyxl
+python-docx
 pyinstaller

@@ -13,16 +13,25 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from faster_whisper import WhisperModel
 from openpyxl import Workbook
-from openpyxl.styles import Alignment
+from openpyxl.styles import Alignment, PatternFill
 import datetime
 import threading
 import av
+import docx
+import winsound
+import ctypes
+import platform
+import numpy as np
+from faster_whisper.audio import decode_audio
 
 # アプリケーション情報
 APP_NAME = "TND_AudioTranscription"
-APP_VERSION = "1.4.2"
+APP_VERSION = "1.5.0"
 APP_TITLE = f"TND audio_transcription v{APP_VERSION}"
 APP_ICON_NAME = "TND_AudioTranscription01.ico"
+
+# 低信頼区間とみなす avg_logprob のしきい値（これ未満はハイライト対象）
+LOW_CONFIDENCE_LOGPROB = -0.8
 
 # 単語登録キャッシュファイル名
 HOTWORDS_FILE = "hotwords.json"
@@ -45,11 +54,33 @@ class ProcessingCancelled(Exception):
     pass
 
 
+def cleanup_old_logs(log_dir, days=30):
+    """30日より古いログファイルを削除する"""
+    cutoff = datetime.datetime.now() - datetime.timedelta(days=days)
+    for entry in os.listdir(log_dir):
+        m = re.match(r"^app-(\d{8})\.log$", entry)
+        if not m:
+            continue
+        try:
+            file_date = datetime.datetime.strptime(m.group(1), "%Y%m%d")
+        except ValueError:
+            continue
+        if file_date < cutoff:
+            try:
+                os.remove(os.path.join(log_dir, entry))
+            except OSError:
+                pass
+
+
 def setup_logging():
     """ログ出力の初期設定（logs/app-YYYYMMDD.log に出力）"""
     app_dir = get_app_dir()
     log_dir = os.path.join(app_dir, "logs")
     os.makedirs(log_dir, exist_ok=True)
+    try:
+        cleanup_old_logs(log_dir)
+    except OSError:
+        pass
     log_file = os.path.join(log_dir, f"app-{datetime.datetime.now().strftime('%Y%m%d')}.log")
 
     handler = logging.FileHandler(log_file, encoding="utf-8")
@@ -94,6 +125,12 @@ https://github.com/SYSTRAN/faster-whisper
 ■ OpenAI Whisper (Model)
 MIT License  Copyright (c) 2022 OpenAI
 https://github.com/openai/whisper
+
+■ python-docx
+MIT License  https://github.com/python-openxml/python-docx
+
+■ lxml
+BSD 3-Clause License  https://github.com/lxml/lxml
 
 ■ openpyxl
 MIT License  Copyright (c) 2010 openpyxl
@@ -222,6 +259,75 @@ def export_audio_segment(src_path, dst_path, start_sec, end_sec):
                 out_container.mux(packet)
 
 
+def _spectral_gate(x, n_fft=512, hop=128):
+    """1チャンクに対するスペクトルゲーティング（ノイズ抑制）"""
+    win = np.hanning(n_fft)
+    n_frames = 1 + (len(x) - n_fft) // hop
+    idx = np.arange(n_fft)[None, :] + hop * np.arange(n_frames)[:, None]
+    frames = x[idx] * win[None, :]
+    spec = np.fft.rfft(frames, axis=1)
+    mag = np.abs(spec).astype(np.float32)
+
+    # 周波数ビンごとの雑音床を時間方向の下位パーセンタイルで推定（チャンクごとに適応）
+    noise = np.percentile(mag, 15, axis=0)
+
+    # ゲイン計算（過減算 1.5 倍、下限 0.1 で自然さを維持）
+    gain = 1.0 - 1.5 * noise[None, :] / np.maximum(mag, 1e-10)
+    gain = np.clip(gain, 0.1, 1.0)
+
+    # 時間方向・周波数方向に軽く平滑化してミュージカルノイズを抑える
+    g = gain
+    g = (np.vstack([g[:1], g[:-1]]) + g + np.vstack([g[1:], g[-1:]])) / 3.0
+    g = (np.hstack([g[:, :1], g[:, :-1]]) + g + np.hstack([g[:, 1:], g[:, -1:]])) / 3.0
+
+    spec *= g
+
+    rec = np.fft.irfft(spec, n=n_fft, axis=1) * win[None, :]
+    y = np.zeros(len(x))
+    norm = np.zeros(len(x))
+    win_sq = win ** 2
+    for i in range(n_frames):
+        s = i * hop
+        y[s:s + n_fft] += rec[i]
+        norm[s:s + n_fft] += win_sq
+    y[:n_frames * hop + n_fft] /= np.maximum(norm[:n_frames * hop + n_fft], 1e-8)
+    # フレーム化で端数となった末尾はそのまま残す
+    tail = n_frames * hop + n_fft - hop
+    if tail < len(x):
+        y[tail:] = x[tail:]
+    return y
+
+
+def preprocess_low_quality(audio, cancel_event=None, sampling_rate=16000):
+    """雑音の多い音声を認識向けに前処理する（ノイズ抑制+音量正規化）。
+
+    16kHz float32 モノラル波形を受け取り、60秒チャンクごとに
+    スペクトルゲーティングを適用（メモリ使用を一定に保つ）し、
+    最後に全体の音量を正規化した波形を返す。
+    """
+    x = np.asarray(audio, dtype=np.float64)
+    if len(x) < 2048:
+        return np.asarray(audio, dtype=np.float32)
+
+    chunk = sampling_rate * 60
+    y = np.empty(len(x))
+    for s in range(0, len(x), chunk):
+        if cancel_event is not None and cancel_event.is_set():
+            raise ProcessingCancelled()
+        seg = x[s:s + chunk]
+        if len(seg) < 2048:
+            y[s:s + len(seg)] = seg
+        else:
+            y[s:s + len(seg)] = _spectral_gate(seg)
+
+    # RMS 正規化（目標 -20dBFS 相当、増幅は最大20倍まで）
+    rms = np.sqrt(np.mean(y ** 2))
+    if rms > 1e-8:
+        y *= min(0.1 / rms, 20.0)
+    y = np.clip(y, -1.0, 1.0)
+    return y.astype(np.float32)
+
+
 def detect_models():
     """modelsフォルダ内のHuggingFaceキャッシュ形式フォルダからモデル名を検出する"""
     model_dir = resource_path("models")
@@ -311,7 +417,7 @@ class AudioTranscriptionApp:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title(APP_TITLE)
-        self.root.geometry("500x680")
+        self.root.geometry("500x760")
         self.root.resizable(True, True)
 
         self.input_file_paths = []
@@ -331,6 +437,8 @@ class AudioTranscriptionApp:
         self.output_split_var = tk.BooleanVar(value=bool(self.settings.get("output_split", True)))
         self.output_txt_var = tk.BooleanVar(value=bool(self.settings.get("output_txt", False)))
         self.output_srt_var = tk.BooleanVar(value=bool(self.settings.get("output_srt", False)))
+        self.output_docx_var = tk.BooleanVar(value=bool(self.settings.get("output_docx", False)))
+        self.low_quality_var = tk.BooleanVar(value=bool(self.settings.get("low_quality_mode", False)))
 
         # ウィンドウアイコンの設定
         self.set_window_icon()
@@ -395,6 +503,8 @@ class AudioTranscriptionApp:
         help_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="ヘルプ", menu=help_menu)
         help_menu.add_command(label="単語登録機能について", command=self.show_hotwords_help)
+        help_menu.add_separator()
+        help_menu.add_command(label="サポート情報をコピー", command=self.copy_support_info)
         help_menu.add_separator()
         help_menu.add_command(label="ライセンス情報", command=self.show_license_info)
 
@@ -571,6 +681,22 @@ class AudioTranscriptionApp:
         )
         self.output_srt_check.pack(anchor=tk.W)
 
+        self.output_docx_check = ttk.Checkbutton(
+            output_options_frame, text="Word (.docx) も出力",
+            variable=self.output_docx_var, command=self.on_output_option_changed
+        )
+        self.output_docx_check.pack(anchor=tk.W)
+
+        # 認識オプション
+        recog_frame = ttk.LabelFrame(main_frame, text="認識オプション", padding="10")
+        recog_frame.pack(fill=tk.X, pady=(0, 10))
+
+        self.low_quality_check = ttk.Checkbutton(
+            recog_frame, text="低品質音源モード（ノイズ抑制。雑音がひどい音源のみON推奨）",
+            variable=self.low_quality_var, command=self.on_output_option_changed
+        )
+        self.low_quality_check.pack(anchor=tk.W)
+
         # 実行ボタン・キャンセルボタン
         button_row = ttk.Frame(main_frame)
         button_row.pack(pady=10)
@@ -678,6 +804,8 @@ class AudioTranscriptionApp:
         self.settings["output_split"] = self.output_split_var.get()
         self.settings["output_txt"] = self.output_txt_var.get()
         self.settings["output_srt"] = self.output_srt_var.get()
+        self.settings["output_docx"] = self.output_docx_var.get()
+        self.settings["low_quality_mode"] = self.low_quality_var.get()
         save_settings(self.settings)
 
     def update_progress(self, current, total, status_text, detail_text=""):
@@ -700,6 +828,8 @@ class AudioTranscriptionApp:
         self.output_split_check.config(state=state)
         self.output_txt_check.config(state=state)
         self.output_srt_check.config(state=state)
+        self.output_docx_check.config(state=state)
+        self.low_quality_check.config(state=state)
         if hasattr(self, "model_combo"):
             self.model_combo.config(state="readonly" if enabled else tk.DISABLED)
         self.cancel_btn.config(state=tk.DISABLED if enabled else tk.NORMAL)
@@ -781,6 +911,7 @@ class AudioTranscriptionApp:
 
     def on_process_complete(self, file_count, succeeded, failed_names):
         """処理完了時の処理"""
+        self.notify_completion()
         if not failed_names:
             messagebox.showinfo("完了", "処理が完了しました。")
         else:
@@ -793,6 +924,31 @@ class AudioTranscriptionApp:
         # 出力フォルダを開く
         if self.output_folder_path:
             os.startfile(self.output_folder_path)
+
+    def notify_completion(self):
+        """処理完了を音とタスクバー点滅で通知する"""
+        try:
+            winsound.MessageBeep(winsound.MB_ICONASTERISK)
+            FLASHW_ALL = 0x00000003
+            FLASHW_TIMERNOFG = 0x0000000C
+
+            class FLASHWINFO(ctypes.Structure):
+                _fields_ = [
+                    ("cbSize", ctypes.c_uint),
+                    ("hwnd", ctypes.c_void_p),
+                    ("dwFlags", ctypes.c_uint),
+                    ("uCount", ctypes.c_uint),
+                    ("dwTimeout", ctypes.c_uint),
+                ]
+
+            hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
+            info = FLASHWINFO(
+                ctypes.sizeof(FLASHWINFO), hwnd,
+                FLASHW_ALL | FLASHW_TIMERNOFG, 5, 0
+            )
+            ctypes.windll.user32.FlashWindowEx(ctypes.byref(info))
+        except Exception:
+            pass
 
     @staticmethod
     def format_time(seconds):
@@ -843,17 +999,30 @@ class AudioTranscriptionApp:
             f"{INITIAL_PROMPT} {hotwords_str}" if hotwords_str else INITIAL_PROMPT
         )
 
+        # 低品質音源モード: ノイズ抑制+音量正規化した波形を直接認識にかける。
+        # 通常音源ではわずかに悪化しうるため既定OFF（雑音がひどい音源の救済用）。
+        audio_input = file_path
+        if self.low_quality_var.get():
+            self.root.after(0, lambda: self.update_progress(
+                3, 100, f"{prefix}音声を前処理中（ノイズ抑制）..."))
+            logger.info("低品質音源モード: ノイズ抑制前処理を実行")
+            audio_input = preprocess_low_quality(
+                decode_audio(file_path, sampling_rate=16000), self.cancel_event)
+            transcribe_params["vad_parameters"] = dict(threshold=0.25)
+
         # ファイル全体を1回で文字起こしし、タイムスタンプで1分単位にまとめる
         # （物理分割しないため文の途中で切れず、再エンコードによる劣化もない）
         self.root.after(0, lambda: self.update_progress(5, 100, f"{prefix}文字起こし中...", ""))
-        segments, info = model.transcribe(file_path, **transcribe_params)
+        segments, info = model.transcribe(audio_input, **transcribe_params)
         duration = max(info.duration or 0, 1.0)
         logger.info(f"音声長: {duration:.1f}秒")
 
         split_interval = 60
         buckets = {}
+        bucket_logprobs = {}
         raw_segments = []
         total_chars = 0
+        segment_loop_start = datetime.datetime.now()
         for segment in segments:
             if self.cancel_event.is_set():
                 raise ProcessingCancelled()
@@ -862,11 +1031,27 @@ class AudioTranscriptionApp:
             buckets.setdefault(idx, []).append(text)
             raw_segments.append((segment.start, segment.end, text))
             total_chars += len(text)
+            avg_logprob = segment.avg_logprob
+            if idx not in bucket_logprobs or avg_logprob < bucket_logprobs[idx]:
+                bucket_logprobs[idx] = avg_logprob
+
+            elapsed = (datetime.datetime.now() - segment_loop_start).total_seconds()
+            detail_text = ""
+            if elapsed >= 1.0 and segment.end > 0:
+                speed = segment.end / elapsed
+                if speed > 0:
+                    remaining = max(duration - segment.end, 0) / speed
+                    if remaining >= 60:
+                        detail_text = f"残り約{int(remaining // 60)}分"
+                    else:
+                        detail_text = f"残り約{int(remaining)}秒"
+
             progress = 5 + min(segment.end / duration, 1.0) * 93
             status_text = f"{prefix}文字起こし中... ({self.format_time(segment.end)} / {self.format_time(duration)})"
-            self.root.after(0, lambda p=progress, st=status_text:
-                            self.update_progress(p, 100, st, ""))
+            self.root.after(0, lambda p=progress, st=status_text, dt=detail_text:
+                            self.update_progress(p, 100, st, dt))
 
+        low_conf_rows = {idx for idx, v in bucket_logprobs.items() if v < LOW_CONFIDENCE_LOGPROB}
         num_rows = max(buckets.keys()) + 1 if buckets else 1
         end_time_all = datetime.datetime.now()
         logger.info(f"文字起こし完了 ({total_chars}文字) 処理時間: {end_time_all - start_time_all}")
@@ -898,6 +1083,7 @@ class AudioTranscriptionApp:
         workbook = Workbook()
         sheet = workbook.active
         sheet.append(['No', '時間帯', '音声ファイル', '変換結果'])
+        low_conf_fill = PatternFill(fill_type="solid", start_color="FFF9C4")
         for idx in range(num_rows):
             start_sec = idx * split_interval
             end_sec = min((idx + 1) * split_interval, duration)
@@ -908,6 +1094,8 @@ class AudioTranscriptionApp:
             # 音声ファイルセルから該当区間の分割音声を開けるようにリンクを付与
             if link_path:
                 sheet.cell(row=idx + 2, column=3).hyperlink = link_path
+            if idx in low_conf_rows:
+                sheet.cell(row=idx + 2, column=4).fill = low_conf_fill
         sheet.column_dimensions['A'].width = 6
         sheet.column_dimensions['B'].width = 22
         sheet.column_dimensions['C'].width = 28
@@ -928,6 +1116,8 @@ class AudioTranscriptionApp:
             self.write_txt_output(output_folder, file_name, buckets, num_rows, split_interval, duration)
         if self.output_srt_var.get():
             self.write_srt_output(output_folder, file_name, raw_segments)
+        if self.output_docx_var.get():
+            self.write_docx_output(output_folder, file_name, buckets, num_rows, split_interval, duration, low_conf_rows)
 
         # 進捗更新: 完了
         self.root.after(0, lambda: self.update_progress(100, 100, f"{prefix}完了！",
@@ -959,6 +1149,68 @@ class AudioTranscriptionApp:
         with open(output_file, "w", encoding="utf-8") as f:
             f.write("\n".join(lines))
         logger.info(f"字幕ファイル {output_file} を保存しました。")
+
+    def write_docx_output(self, output_folder, file_name, buckets, num_rows, split_interval, duration, low_conf_rows):
+        """1分ブロック単位のWord文書を出力"""
+        output_file = os.path.join(output_folder, f"{file_name}_output.docx")
+        document = docx.Document()
+        document.add_heading(f"文字起こし結果: {file_name}", level=1)
+        document.add_paragraph(
+            f"元ファイル: {file_name} / 総時間: {self.format_time(duration)} / "
+            f"作成日時: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        )
+        for idx in range(num_rows):
+            start_sec = idx * split_interval
+            end_sec = min((idx + 1) * split_interval, duration)
+            heading_text = f"[{self.format_time(start_sec)} - {self.format_time(end_sec)}]"
+            if idx in low_conf_rows:
+                heading_text += " ※要確認"
+            heading_para = document.add_paragraph()
+            heading_run = heading_para.add_run(heading_text)
+            heading_run.bold = True
+            document.add_paragraph('\n'.join(buckets.get(idx, [])))
+            document.add_paragraph("")
+
+        try:
+            document.save(output_file)
+        except PermissionError:
+            raise RuntimeError(
+                f"Wordファイルを保存できません。\n{output_file}\n"
+                f"このファイルを開いている場合は閉じてから再実行してください。"
+            )
+        logger.info(f"Wordファイル {output_file} を保存しました。")
+
+    def copy_support_info(self):
+        """サポート情報をまとめてクリップボードにコピーする"""
+        is_frozen = getattr(sys, 'frozen', False)
+        lines = [
+            APP_TITLE,
+            f"実行形態: {'PyInstaller' if is_frozen else '開発'}",
+            f"OS: {platform.platform()}",
+            f"使用モデル: {self.selected_model_name}",
+            f"検出モデル一覧: {', '.join(self.available_models) if self.available_models else 'なし'}",
+            f"単語登録数: {len(self.hotwords_list)} / {MAX_HOTWORDS}",
+            f"出力オプション: 分割音声={self.output_split_var.get()}, "
+            f"txt={self.output_txt_var.get()}, srt={self.output_srt_var.get()}, "
+            f"docx={self.output_docx_var.get()}",
+        ]
+
+        log_dir = os.path.join(get_app_dir(), "logs")
+        log_file = os.path.join(log_dir, f"app-{datetime.datetime.now().strftime('%Y%m%d')}.log")
+        if os.path.exists(log_file):
+            try:
+                with open(log_file, "r", encoding="utf-8") as f:
+                    log_lines = f.readlines()
+                lines.append("")
+                lines.append("--- ログ末尾40行 ---")
+                lines.extend(line.rstrip("\n") for line in log_lines[-40:])
+            except OSError:
+                lines.append("(ログ読込不可)")
+
+        info_text = "\n".join(lines)
+        self.root.clipboard_clear()
+        self.root.clipboard_append(info_text)
+        messagebox.showinfo("サポート情報", "サポート情報をコピーしました。メール等に貼り付けてご利用ください。")
 
     def run(self):
         self.root.mainloop()
