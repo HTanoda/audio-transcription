@@ -1,11 +1,14 @@
 ﻿; -- setup_turbo.iss --
 ; TND AI議事録アプリ (Turbo版) フルインストーラー
 ;
+; v1.6.0〜: PyInstaller onedir 構成（app\ 配下に本体EXE + _internal\ 一式）。
+; 話者分離モデル（models_diarization）も同梱する。
+;
 ; ビルド例:
-;   ISCC.exe /DAppVersion=1.5.0 /DSourceDir=..\dist\TND_AudioTranscription_turbo_v1.5.0 setup_turbo.iss
+;   ISCC.exe /DAppVersion=1.6.0 /DSourceDir=..\dist\TND_AudioTranscription_turbo_v1.6.0 setup_turbo.iss
 ;
 #ifndef AppVersion
-  #define AppVersion "1.5.0"
+  #define AppVersion "1.6.0"
 #endif
 #ifndef SourceDir
   #define SourceDir "..\dist\TND_AudioTranscription_turbo_v" + AppVersion
@@ -45,10 +48,12 @@ Name: "japanese"; MessagesFile: "compiler:Languages\Japanese.isl"
 Name: "desktopicon"; Description: "デスクトップにショートカットを作成"; GroupDescription: "追加アイコン:"
 
 [Files]
-Source: "{#SourceDir}\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+; PyInstaller onedir 出力一式（本体EXE + _internal\）
+Source: "{#SourceDir}\app\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 Source: "{#SourceDir}\README.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\{#MyAppIcoName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\models\*"; DestDir: "{app}\models"; Flags: recursesubdirs createallsubdirs ignoreversion nocompression
+Source: "{#SourceDir}\models_diarization\*"; DestDir: "{app}\models_diarization"; Flags: recursesubdirs createallsubdirs ignoreversion nocompression
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppIcoName}"

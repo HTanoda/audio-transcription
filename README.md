@@ -173,6 +173,11 @@ python -c "from faster_whisper import WhisperModel; WhisperModel('large-v3', dev
 
 # Turbo版をビルドする場合の高速モデル（約1.5GB）
 python -c "from faster_whisper import WhisperModel; WhisperModel('large-v3-turbo', device='cpu', compute_type='int8', download_root='models_turbo')"
+
+# 話者分離モデルをダウンロード（約31MB、初回のみ）
+# ※ gated モデルのため HF アカウントで利用条件に同意し、アクセストークンが必要
+#    https://huggingface.co/pyannote/speaker-diarization-community-1
+python -c "import os; os.environ['HF_HUB_CACHE']=os.path.abspath('models_diarization'); from pyannote.audio import Pipeline; Pipeline.from_pretrained('pyannote/speaker-diarization-community-1', token='<HFトークン>')"
 ```
 
 ### 実行（開発時）
@@ -186,13 +191,23 @@ python audio_transcription.py
 詳細は [BUILD_GUIDE.md](BUILD_GUIDE.md) を参照してください。
 
 ```bash
-# メインアプリのビルド例
-pyinstaller --onefile --noconsole --icon "TND_AudioTranscription01.ico" --name "TND_audio_transcription" audio_transcription.py
+# メインアプリのビルド例（v1.6.0 から onedir 構成。同梱設定は spec に集約）
+pyinstaller TND_audio_transcription.spec
 ```
 
 ---
 
 ## 📝 更新履歴
+
+### v1.6.0 (2026-07-12)
+- **新機能:** 話者分離（認識オプション、既定OFF）を追加 — Excel に「話者」列、Word の時間見出しに話者を記載（1分ブロックに登場した話者を列挙）。音声認識とは独立に話者分離を実行し、タイムスタンプで後合成する方式のため、**認識結果のテキスト・精度には一切影響しない**。処理時間は音声長の約1/5（CPU）が加算される
+  - 話者分離モデル pyannote/speaker-diarization-community-1（CC BY 4.0、約31MB）を同梱し、完全オフラインで動作
+  - pyannote.audio が既定で行う利用統計のネットワーク送信（テレメトリ）は無効化済み
+  - 話者分離が成功した場合、既存の `○○_output.xlsx` とは別に、発言単位で話者を並べた話者別Excel `○○_speakers.xlsx` を出力（同一話者の連続発言は1行に結合）
+- **新機能:** マイク録音を追加 — アプリ内で録音（16kHz/16bit WAV、レベルメーター・経過時間表示付き）し、停止後そのまま文字起こしを開始可能
+- **改善:** PyInstaller を onefile から onedir 構成に変更（起動時の一時展開を廃止し起動を高速化）
+- **改善:** 同梱物の疎通確認を行う `--selftest` 起動オプションを追加（モデル解決・録音デバイス・話者分離の実行確認を logs/ に記録）
+- **依存追加:** sounddevice (MIT)、PortAudio (MIT)、pyannote.audio (MIT)、PyTorch CPU版 (BSD-3-Clause)、torchaudio (BSD-2-Clause)、話者分離モデル (CC BY 4.0)
 
 ### v1.5.0 (2026-07-12)
 - **新機能:** 低品質音源モード（認識オプション、既定OFF）を追加 — ノイズ抑制+音量正規化により、雑音がひどく認識が崩れる音源を救済（通常の音源ではOFF推奨。ONにするとわずかに精度が悪化する場合あり）

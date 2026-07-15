@@ -2,4 +2,10 @@ faster-whisper
 av
 openpyxl
 python-docx
+sounddevice
+pyannote.audio
+# torch / torchaudio は配布用に CPU 版を使用すること:
+#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+torch
+torchaudio
 pyinstaller

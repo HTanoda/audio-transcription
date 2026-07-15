@@ -28,7 +28,6 @@ env/
 
 # PyInstaller
 *.manifest
-*.spec
 
 # Models (large files)
 models/

@@ -8,6 +8,11 @@ import logging
 # faster_whisper / huggingface_hub のインポート前に設定する必要がある。
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+# pyannote.audio は既定でテレメトリ（OTLP経由で otel.pyannote.ai へ使用状況を送信）が
+# 有効になっている。オフライン専用アプリのため、pyannote.audio のインポート前に
+# 明示的に無効化する（PYANNOTE_METRICS_ENABLED は pyannote.audio.telemetry.metrics が
+# 参照する環境変数）。
+os.environ.setdefault("PYANNOTE_METRICS_ENABLED", "false")
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -16,17 +21,20 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, PatternFill
 import datetime
 import threading
+import queue
+import wave
 import av
 import docx
 import winsound
 import ctypes
 import platform
 import numpy as np
+import sounddevice as sd
 from faster_whisper.audio import decode_audio
 
 # アプリケーション情報
 APP_NAME = "TND_AudioTranscription"
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.6.0"
 APP_TITLE = f"TND audio_transcription v{APP_VERSION}"
 APP_ICON_NAME = "TND_AudioTranscription01.ico"
 
@@ -45,6 +53,18 @@ DEFAULT_MODEL_NAME = "large-v3"
 # 句読点を打たせるための呼び水プロンプト（句読点付きの文を与えることで
 # モデルが句読点を出力しやすくなる。固有名詞は誤混入を避けるため含めない）
 INITIAL_PROMPT = "こんにちは。本日は、よろしくお願いします。それでは、会議を始めます。"
+
+# マイク録音の形式（16kHz / 16bit / モノラル固定）
+RECORD_SAMPLE_RATE = 16000
+RECORD_CHANNELS = 1
+RECORD_DTYPE = "int16"
+
+# 話者分離（同梱モデルがある場合のみ有効化）
+DIARIZATION_MODEL_DIR = "models_diarization"
+DIARIZATION_MODEL_REPO = "pyannote/speaker-diarization-community-1"
+DIARIZATION_SAMPLE_RATE = 16000
+DIARIZATION_UNKNOWN_SPEAKER = "不明"
+DIARIZATION_NEAREST_THRESHOLD_SEC = 2.0
 
 logger = logging.getLogger("audio_transcription")
 
@@ -147,6 +167,30 @@ https://github.com/numpy/numpy
 ■ PyAV (FFmpeg Python bindings)
 BSD 3-Clause License  Copyright (c) 2013, Mike Boers
 https://github.com/PyAV-Org/PyAV
+
+■ pyannote.audio（話者分離）
+MIT License  Copyright (c) 2020 CNRS
+https://github.com/pyannote/pyannote-audio
+
+■ pyannote/speaker-diarization-community-1（話者分離モデル）
+CC BY 4.0（帰属: pyannote）
+https://huggingface.co/pyannote/speaker-diarization-community-1
+
+■ PyTorch（話者分離の計算基盤・CPU版）
+BSD 3-Clause License  Copyright (c) 2016- Facebook, Inc他
+https://github.com/pytorch/pytorch
+
+■ torchaudio
+BSD 2-Clause License  Copyright (c) 2017 Facebook Inc.(Soumith Chintala)
+https://github.com/pytorch/audio
+
+■ python-sounddevice（マイク録音）
+MIT License  Copyright (c) 2015-2025 Matthias Geier
+https://github.com/spatialaudio/python-sounddevice
+
+■ PortAudio（マイク録音の音声入出力ライブラリ）
+MIT License  Copyright (c) 1999-2011 Ross Bencina and Phil Burk
+https://www.portaudio.com/
 ─────────────────────────────────────\
 """
 
@@ -384,6 +428,160 @@ def resolve_local_model_path(model_name):
     return None
 
 
+def resolve_diarization_model_path():
+    """話者分離モデルの同梱キャッシュフォルダのパスを返す（無効／不在なら None）。
+
+    Pipeline.from_pretrained(..., cache_dir=<この戻り値>) にそのまま渡せる、
+    HuggingFace hub キャッシュのルート（models_diarization フォルダ自体）を返す。
+    """
+    cache_dir = resource_path(DIARIZATION_MODEL_DIR)
+    if not os.path.isdir(cache_dir):
+        return None
+    model_dir = os.path.join(
+        cache_dir, "models--" + DIARIZATION_MODEL_REPO.replace("/", "--")
+    )
+    snapshots = os.path.join(model_dir, "snapshots")
+    if not os.path.isdir(snapshots):
+        return None
+    for entry in sorted(os.listdir(snapshots)):
+        snap_path = os.path.join(snapshots, entry)
+        if os.path.isdir(snap_path) and os.path.isfile(os.path.join(snap_path, "config.yaml")):
+            return cache_dir
+    return None
+
+
+def run_selftest():
+    """--selftest: GUIを起動せず、凍結EXEの同梱漏れを検出するための疎通確認を行う。
+
+    1. faster-whisper: detect_models() + resolve_local_model_path() でモデル実体を解決できるか
+    2. sounddevice: import + query_devices()（入力デバイス0件でも成功。import/DLLエラーのみ失敗）
+    3. pyannote.audio: resolve_diarization_model_path() 解決 + Pipeline.from_pretrained() ロード
+       + 5秒のダミー波形で pipeline を実行完走できるか（話者0人でも成功）
+
+    結果は logs/selftest_YYYYMMDD_HHMMSS.log に書き出す。
+    戻り値は終了コード（0=全成功 / 1=失敗あり）。
+    """
+    app_dir = get_app_dir()
+    log_dir = os.path.join(app_dir, "logs")
+    try:
+        os.makedirs(log_dir, exist_ok=True)
+    except OSError:
+        pass
+    log_path = os.path.join(
+        log_dir, "selftest_{}.log".format(datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))
+    )
+
+    results = []
+
+    def record(name, ok, detail=""):
+        results.append((name, ok, detail))
+
+    # 1. faster-whisper: ローカルモデル実体の解決
+    try:
+        model_names = detect_models()
+        if not model_names:
+            raise RuntimeError("モデルが検出できません（detect_models() が空）")
+        target_model = model_names[0]
+        model_path = resolve_local_model_path(target_model)
+        if not model_path:
+            raise RuntimeError(f"モデル実体を解決できません: {target_model}")
+        record("faster_whisper", True, f"model={target_model} path={model_path}")
+    except Exception as e:
+        record("faster_whisper", False, f"{type(e).__name__}: {e}")
+
+    # 2. sounddevice: import + デバイス列挙（デバイス0件は許容、import/DLLエラーのみ失敗）
+    try:
+        devices = sd.query_devices()
+        record("sounddevice", True, f"device_count={len(devices)}")
+    except Exception as e:
+        record("sounddevice", False, f"{type(e).__name__}: {e}")
+
+    # 3. pyannote.audio: モデル解決 + ロード + ダミー波形での実行完走
+    try:
+        diarization_path = resolve_diarization_model_path()
+        if not diarization_path:
+            raise RuntimeError("話者分離モデルが検出できません")
+        import torch
+        from pyannote.audio import Pipeline
+        pipeline = Pipeline.from_pretrained(DIARIZATION_MODEL_REPO, cache_dir=diarization_path)
+        dummy_audio = (np.random.randn(DIARIZATION_SAMPLE_RATE * 5) * 0.01).astype(np.float32)
+        waveform = torch.from_numpy(dummy_audio).unsqueeze(0)
+        audio_input = {"waveform": waveform, "sample_rate": DIARIZATION_SAMPLE_RATE}
+        diarization = pipeline(audio_input)
+        annotation = getattr(diarization, "speaker_diarization", diarization)
+        turn_count = sum(1 for _ in annotation.itertracks(yield_label=True))
+        record("pyannote", True, f"path={diarization_path} turns={turn_count}")
+    except Exception as e:
+        record("pyannote", False, f"{type(e).__name__}: {e}")
+
+    all_ok = all(ok for _, ok, _ in results)
+    lines = [
+        f"selftest {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"APP_VERSION={APP_VERSION}",
+        "",
+    ]
+    for name, ok, detail in results:
+        lines.append(f"[{'OK' if ok else 'NG'}] {name}: {detail}")
+    lines.append("")
+    lines.append("RESULT: {}".format("ALL_OK" if all_ok else "FAILED"))
+
+    try:
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+    except OSError:
+        pass
+
+    # --noconsole ビルドではコンソール未接続時に標準出力が使えないことがある
+    # （ダブルクリック起動等）。ログファイルへの記録は上で完了済みのため、
+    # コンソール出力の失敗で終了コードの返却を妨げないようにする。
+    try:
+        for line in lines:
+            print(line)
+    except Exception:
+        pass
+
+    return 0 if all_ok else 1
+
+
+def decode_audio_pyav_16k_mono(path):
+    """PyAVで音声を16kHzモノラルfloat32のnumpy配列にデコードする（話者分離の入力用）"""
+    resampler = av.AudioResampler(format="fltp", layout="mono", rate=DIARIZATION_SAMPLE_RATE)
+    chunks = []
+    with av.open(path) as container:
+        stream = container.streams.audio[0]
+        for frame in container.decode(stream):
+            for rf in resampler.resample(frame):
+                chunks.append(rf.to_ndarray().reshape(-1))
+        for rf in resampler.resample(None):
+            chunks.append(rf.to_ndarray().reshape(-1))
+    if not chunks:
+        raise RuntimeError(f"音声フレームをデコードできませんでした: {path}")
+    return np.concatenate(chunks).astype(np.float32)
+
+
+def assign_speaker_to_segment(seg_start, seg_end, turns):
+    """Whisperセグメントに話者を割り当てる（重なり合算最大→近傍2秒以内→不明）"""
+    overlaps = {}
+    for turn in turns:
+        ov = min(seg_end, turn["end"]) - max(seg_start, turn["start"])
+        if ov > 0:
+            overlaps[turn["speaker"]] = overlaps.get(turn["speaker"], 0.0) + ov
+    if overlaps:
+        return max(overlaps.items(), key=lambda kv: kv[1])[0]
+
+    center = (seg_start + seg_end) / 2.0
+    best_speaker = None
+    best_dist = None
+    for turn in turns:
+        dist = min(abs(center - turn["start"]), abs(center - turn["end"]))
+        if best_dist is None or dist < best_dist:
+            best_dist = dist
+            best_speaker = turn["speaker"]
+    if best_dist is not None and best_dist <= DIARIZATION_NEAREST_THRESHOLD_SEC:
+        return best_speaker
+    return DIARIZATION_UNKNOWN_SPEAKER
+
+
 def get_app_dir():
     """アプリケーションのインストールディレクトリを取得"""
     if getattr(sys, 'frozen', False):
@@ -417,7 +615,7 @@ class AudioTranscriptionApp:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title(APP_TITLE)
-        self.root.geometry("500x760")
+        self.root.geometry("500x940")
         self.root.resizable(True, True)
 
         self.input_file_paths = []
@@ -426,6 +624,18 @@ class AudioTranscriptionApp:
         self.cancel_event = threading.Event()
         self.hotwords_list = load_hotwords()
         self.settings = load_settings()
+
+        # マイク録音用の状態
+        self.is_recording = False
+        self.record_stream = None
+        self.record_queue = None
+        self.record_writer_thread = None
+        self.record_wave_file = None
+        self.record_output_path = None
+        self.record_start_dt = None
+        self.record_level = 0
+        self.record_error = None
+        self.record_poll_id = None
 
         self.available_models = detect_models()
         self.selected_model_name = self.settings.get("model_name") or (
@@ -440,6 +650,9 @@ class AudioTranscriptionApp:
         self.output_docx_var = tk.BooleanVar(value=bool(self.settings.get("output_docx", False)))
         self.low_quality_var = tk.BooleanVar(value=bool(self.settings.get("low_quality_mode", False)))
 
+        self.diarization_model_path = resolve_diarization_model_path()
+        self.diarization_var = tk.BooleanVar(value=bool(self.settings.get("diarization", False)))
+
         # ウィンドウアイコンの設定
         self.set_window_icon()
 
@@ -453,7 +666,11 @@ class AudioTranscriptionApp:
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
     def on_close(self):
-        """ウィンドウを閉じる際の処理（処理中は確認する）"""
+        """ウィンドウを閉じる際の処理（処理中・録音中は確認する）"""
+        if self.is_recording:
+            if not messagebox.askyesno("確認", "録音中です。停止して終了しますか？"):
+                return
+            self.stop_recording(on_close=True)
         if self.is_processing:
             if messagebox.askyesno("確認", "処理が実行中です。中断して終了しますか？"):
                 self.cancel_event.set()
@@ -589,6 +806,26 @@ class AudioTranscriptionApp:
         self.file_label = ttk.Label(file_frame, text="ファイルが選択されていません")
         self.file_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
+        # マイク録音
+        record_frame = ttk.LabelFrame(main_frame, text="マイク録音", padding="10")
+        record_frame.pack(fill=tk.X, pady=(0, 10))
+
+        record_btn_row = ttk.Frame(record_frame)
+        record_btn_row.pack(fill=tk.X, pady=(0, 5))
+
+        self.record_start_btn = ttk.Button(record_btn_row, text="録音開始", command=self.start_recording)
+        self.record_start_btn.pack(side=tk.LEFT, padx=(0, 5))
+
+        self.record_stop_btn = ttk.Button(
+            record_btn_row, text="停止", command=self.stop_recording, state=tk.DISABLED)
+        self.record_stop_btn.pack(side=tk.LEFT, padx=(0, 5))
+
+        self.record_time_label = ttk.Label(record_btn_row, text="00:00")
+        self.record_time_label.pack(side=tk.LEFT, padx=(10, 0))
+
+        self.record_level_bar = ttk.Progressbar(record_frame, mode='determinate', maximum=100)
+        self.record_level_bar.pack(fill=tk.X)
+
         # モデル選択（検出されたモデルが2つ以上の場合のみ表示）
         if len(self.available_models) >= 2:
             model_frame = ttk.LabelFrame(main_frame, text="モデル", padding="10")
@@ -697,6 +934,17 @@ class AudioTranscriptionApp:
         )
         self.low_quality_check.pack(anchor=tk.W)
 
+        diarization_text = "話者分離を行う（Excel・Wordに話者を記載。処理時間が延びます）"
+        if not self.diarization_model_path:
+            diarization_text += "（モデル未導入）"
+        self.diarization_check = ttk.Checkbutton(
+            recog_frame, text=diarization_text,
+            variable=self.diarization_var, command=self.on_output_option_changed
+        )
+        self.diarization_check.pack(anchor=tk.W)
+        if not self.diarization_model_path:
+            self.diarization_check.config(state=tk.DISABLED)
+
         # 実行ボタン・キャンセルボタン
         button_row = ttk.Frame(main_frame)
         button_row.pack(pady=10)
@@ -712,7 +960,151 @@ class AudioTranscriptionApp:
         self.cancel_event.set()
         self.cancel_btn.config(state=tk.DISABLED)
         self.status_label.config(text="キャンセル中...")
-    
+
+    @staticmethod
+    def format_mmss(seconds):
+        """秒数を MM:SS 形式の文字列に変換（録音経過時間表示用）"""
+        sec = int(seconds)
+        return f"{sec // 60:02d}:{sec % 60:02d}"
+
+    def start_recording(self):
+        """マイク録音を開始する"""
+        if self.is_processing or self.is_recording:
+            return
+        if not self.output_folder_path:
+            messagebox.showwarning("警告", "出力フォルダを選択してください。")
+            return
+
+        file_name = f"録音_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.wav"
+        output_path = os.path.join(self.output_folder_path, file_name)
+
+        try:
+            os.makedirs(self.output_folder_path, exist_ok=True)
+            wave_file = wave.open(output_path, 'wb')
+            wave_file.setnchannels(RECORD_CHANNELS)
+            wave_file.setsampwidth(2)
+            wave_file.setframerate(RECORD_SAMPLE_RATE)
+        except OSError:
+            logger.exception(f"録音ファイルを作成できませんでした: {output_path}")
+            messagebox.showerror(
+                "エラー",
+                "録音ファイルを作成できませんでした。\n出力フォルダの権限を確認してください。"
+            )
+            return
+
+        self.record_queue = queue.Queue()
+        self.record_error = None
+        self.record_level = 0
+
+        def on_audio_block(indata, frames, time_info, status):
+            if status:
+                logger.warning(f"録音ステータス: {status}")
+            if len(indata):
+                peak = int(np.abs(indata.astype(np.int32)).max())
+                self.record_level = min(int(peak / 32767 * 100), 100)
+            self.record_queue.put(bytes(indata))
+
+        try:
+            stream = sd.InputStream(
+                samplerate=RECORD_SAMPLE_RATE, channels=RECORD_CHANNELS,
+                dtype=RECORD_DTYPE, callback=on_audio_block
+            )
+            stream.start()
+        except Exception:
+            logger.exception("マイクのオープンに失敗しました。")
+            wave_file.close()
+            try:
+                os.remove(output_path)
+            except OSError:
+                pass
+            messagebox.showerror("エラー", "マイクを開けませんでした。マイクが接続されているか確認してください。")
+            return
+
+        def writer():
+            while True:
+                data = self.record_queue.get()
+                if data is None:
+                    break
+                try:
+                    wave_file.writeframes(data)
+                except OSError:
+                    logger.exception("録音データの書き込みに失敗しました。")
+                    self.record_error = "録音データの書き込みに失敗しました。"
+                    break
+
+        self.record_stream = stream
+        self.record_wave_file = wave_file
+        self.record_output_path = output_path
+        self.record_writer_thread = threading.Thread(target=writer, daemon=True)
+        self.record_writer_thread.start()
+
+        self.is_recording = True
+        self.record_start_dt = datetime.datetime.now()
+        self._set_recording_ui(True)
+        logger.info(f"録音を開始しました: {output_path}")
+        self._poll_recording()
+
+    def _poll_recording(self):
+        """録音中の経過時間・レベルメーターを定期更新する"""
+        if not self.is_recording:
+            return
+        elapsed = (datetime.datetime.now() - self.record_start_dt).total_seconds()
+        self.record_time_label.config(text=self.format_mmss(elapsed))
+        self.record_level_bar['value'] = self.record_level
+        if self.record_error:
+            message = self.record_error
+            self.record_error = None
+            self._finalize_recording()
+            messagebox.showerror("エラー", f"{message}\n録音を停止しました。")
+            return
+        self.record_poll_id = self.root.after(150, self._poll_recording)
+
+    def _finalize_recording(self):
+        """録音ストリーム・ライタースレッド・WAVファイルを後始末する"""
+        if self.record_poll_id is not None:
+            self.root.after_cancel(self.record_poll_id)
+            self.record_poll_id = None
+        try:
+            if self.record_stream is not None:
+                self.record_stream.stop()
+                self.record_stream.close()
+        except Exception:
+            logger.exception("録音ストリームの停止に失敗しました。")
+        self.record_stream = None
+
+        if self.record_queue is not None:
+            self.record_queue.put(None)
+        if self.record_writer_thread is not None:
+            self.record_writer_thread.join(timeout=5)
+        self.record_writer_thread = None
+
+        try:
+            if self.record_wave_file is not None:
+                self.record_wave_file.close()
+        except Exception:
+            logger.exception("録音ファイルのクローズに失敗しました。")
+        self.record_wave_file = None
+
+        self.is_recording = False
+        self.record_time_label.config(text="00:00")
+        self.record_level_bar['value'] = 0
+        self._set_recording_ui(False)
+
+    def stop_recording(self, on_close=False):
+        """マイク録音を停止する（on_close=True の場合はダイアログを出さず終了処理のみ行う）"""
+        if not self.is_recording:
+            return
+        output_path = self.record_output_path
+        self._finalize_recording()
+        logger.info(f"録音を保存しました: {output_path}")
+        if on_close:
+            return
+        self.input_file_paths = [output_path]
+        display_path = output_path if len(output_path) < 50 else "..." + output_path[-47:]
+        self.file_label.config(text=display_path)
+        if messagebox.askyesno("録音完了", "録音を保存しました。このまま文字起こしを開始しますか？"):
+            self.start_processing()
+
     def select_input_file(self):
         filetypes = [("音声ファイル", "*.wav;*.mp3;*.m4a;*.mp4")]
         file_paths = filedialog.askopenfilenames(
@@ -806,6 +1198,7 @@ class AudioTranscriptionApp:
         self.settings["output_srt"] = self.output_srt_var.get()
         self.settings["output_docx"] = self.output_docx_var.get()
         self.settings["low_quality_mode"] = self.low_quality_var.get()
+        self.settings["diarization"] = self.diarization_var.get()
         save_settings(self.settings)
 
     def update_progress(self, current, total, status_text, detail_text=""):
@@ -830,11 +1223,26 @@ class AudioTranscriptionApp:
         self.output_srt_check.config(state=state)
         self.output_docx_check.config(state=state)
         self.low_quality_check.config(state=state)
+        if self.diarization_model_path:
+            self.diarization_check.config(state=state)
         if hasattr(self, "model_combo"):
             self.model_combo.config(state="readonly" if enabled else tk.DISABLED)
         self.cancel_btn.config(state=tk.DISABLED if enabled else tk.NORMAL)
-    
+        self.record_start_btn.config(state=tk.DISABLED if (not enabled or self.is_recording) else tk.NORMAL)
+
+    def _set_recording_ui(self, recording):
+        """録音中は入力ファイル選択・出力フォルダ選択・文字起こし開始を無効化する"""
+        lock_state = tk.DISABLED if recording else tk.NORMAL
+        self.file_btn.config(state=lock_state)
+        self.folder_btn.config(state=lock_state)
+        self.run_btn.config(state=lock_state)
+        self.record_start_btn.config(state=tk.DISABLED if recording else tk.NORMAL)
+        self.record_stop_btn.config(state=tk.NORMAL if recording else tk.DISABLED)
+
     def start_processing(self):
+        if self.is_recording:
+            messagebox.showwarning("警告", "録音中は文字起こしを開始できません。録音を停止してください。")
+            return
         if not self.input_file_paths:
             messagebox.showwarning("警告", "入力ファイルを選択してください。")
             return
@@ -870,6 +1278,8 @@ class AudioTranscriptionApp:
         succeeded = 0
         failed_names = []
         model = None
+        diarization_pipeline = None
+        want_diarization = bool(self.diarization_var.get() and self.diarization_model_path)
         try:
             for file_index, file_path in enumerate(self.input_file_paths, start=1):
                 if self.cancel_event.is_set():
@@ -889,9 +1299,24 @@ class AudioTranscriptionApp:
                             model_path, device="cpu",
                             compute_type="int8", local_files_only=True
                         )
+                    if want_diarization and diarization_pipeline is None:
+                        # 話者分離パイプラインはバッチ全体で1回だけロードする。
+                        # torch / pyannote は重いため、実際に必要になった時点で初めて import する。
+                        try:
+                            self.root.after(0, lambda: self.update_progress(
+                                0, 100, "話者分離モデルを読み込み中...", ""))
+                            from pyannote.audio import Pipeline
+                            diarization_pipeline = Pipeline.from_pretrained(
+                                DIARIZATION_MODEL_REPO, cache_dir=self.diarization_model_path
+                            )
+                        except Exception:
+                            logger.exception("話者分離モデルの読み込みに失敗しました。話者分離なしで続行します。")
+                            want_diarization = False
+                            diarization_pipeline = None
                     self.transcribe_file(
                         model, file_path, self.output_folder_path,
-                        file_index=file_index, file_count=file_count
+                        file_index=file_index, file_count=file_count,
+                        diarization_pipeline=diarization_pipeline if want_diarization else None
                     )
                     succeeded += 1
                 except ProcessingCancelled:
@@ -967,7 +1392,48 @@ class AudioTranscriptionApp:
         s = total_sec % 60
         return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
-    def transcribe_file(self, model, file_path, output_folder, file_index=1, file_count=1):
+    def diarize_and_assign(self, diarization_pipeline, file_path, raw_segments, prefix):
+        """話者分離を実行し、raw_segments と同じ順序で話者ラベル（話者A等）のリストを返す"""
+        import torch
+
+        audio = decode_audio_pyav_16k_mono(file_path)
+        waveform = torch.from_numpy(audio).unsqueeze(0)
+        audio_input = {"waveform": waveform, "sample_rate": DIARIZATION_SAMPLE_RATE}
+
+        def hook(step_name, step_artifact, file=None, total=None, completed=None):
+            if self.cancel_event.is_set():
+                raise ProcessingCancelled()
+            if total and completed is not None:
+                detail_text = f"話者分離中: {step_name} {completed}/{total}"
+            else:
+                detail_text = f"話者分離中: {step_name}"
+            self.root.after(0, lambda dt=detail_text: self.update_progress(
+                96, 100, f"{prefix}話者分離中...", dt))
+
+        diarization = diarization_pipeline(audio_input, hook=hook)
+        annotation = getattr(diarization, "speaker_diarization", diarization)
+        turns = [
+            {"start": turn.start, "end": turn.end, "speaker": speaker}
+            for turn, _, speaker in annotation.itertracks(yield_label=True)
+        ]
+
+        # 話者ラベルは登場順（区間の開始時刻順）に話者A、話者B…へ変換する
+        speaker_order = []
+        for turn in sorted(turns, key=lambda t: t["start"]):
+            if turn["speaker"] not in speaker_order:
+                speaker_order.append(turn["speaker"])
+        label_map = {}
+        for i, raw_speaker in enumerate(speaker_order):
+            label_map[raw_speaker] = f"話者{chr(ord('A') + i)}" if i < 26 else f"話者{i + 1}"
+
+        labels = []
+        for seg_start, seg_end, _text in raw_segments:
+            raw_speaker = assign_speaker_to_segment(seg_start, seg_end, turns)
+            labels.append(label_map.get(raw_speaker, DIARIZATION_UNKNOWN_SPEAKER))
+        return labels
+
+    def transcribe_file(self, model, file_path, output_folder, file_index=1, file_count=1,
+                         diarization_pipeline=None):
         file_extension = os.path.splitext(file_path)[1].lower()
         if file_extension not in (".wav", ".mp3", ".m4a", ".mp4"):
             raise ValueError("サポートされていない音声形式です。")
@@ -1056,6 +1522,37 @@ class AudioTranscriptionApp:
         end_time_all = datetime.datetime.now()
         logger.info(f"文字起こし完了 ({total_chars}文字) 処理時間: {end_time_all - start_time_all}")
 
+        # 話者分離: Whisperの認識結果には一切手を加えず、独立に実行した結果を後合成する。
+        row_speakers = {}
+        segment_speaker_labels = None
+        diarization_succeeded = False
+        if diarization_pipeline is not None:
+            self.root.after(0, lambda: self.update_progress(96, 100, f"{prefix}話者分離中..."))
+            try:
+                speaker_labels = self.diarize_and_assign(
+                    diarization_pipeline, file_path, raw_segments, prefix)
+                for (seg_start, _seg_end, _text), label in zip(raw_segments, speaker_labels):
+                    idx = int(seg_start // split_interval)
+                    bucket_speakers = row_speakers.setdefault(idx, [])
+                    if label not in bucket_speakers:
+                        bucket_speakers.append(label)
+                # 正規の話者が1人でもいるバケットからは「不明」を除く
+                for idx in list(row_speakers.keys()):
+                    real = [sp for sp in row_speakers[idx] if sp != DIARIZATION_UNKNOWN_SPEAKER]
+                    if real:
+                        row_speakers[idx] = real
+                diarization_succeeded = True
+                segment_speaker_labels = speaker_labels
+                logger.info(f"話者分離完了: {file_path}")
+            except ProcessingCancelled:
+                raise
+            except Exception:
+                logger.exception(f"話者分離に失敗しました: {file_path}")
+                row_speakers = {}
+                self.root.after(0, lambda: self.update_progress(
+                    96, 100, f"{prefix}話者分離に失敗しました。話者なしで続行します。"))
+        show_speaker_column = diarization_succeeded
+
         # 再生用の分割音声を専用フォルダに出力（Excelの各行から該当区間へ頭出しできるようにする）
         row_links = {}
         if self.output_split_var.get():
@@ -1082,7 +1579,12 @@ class AudioTranscriptionApp:
         output_file = os.path.join(output_folder, f"{file_name}_output.xlsx")
         workbook = Workbook()
         sheet = workbook.active
-        sheet.append(['No', '時間帯', '音声ファイル', '変換結果'])
+        if show_speaker_column:
+            sheet.append(['No', '時間帯', '話者', '音声ファイル', '変換結果'])
+            link_col, text_col = 4, 5
+        else:
+            sheet.append(['No', '時間帯', '音声ファイル', '変換結果'])
+            link_col, text_col = 3, 4
         low_conf_fill = PatternFill(fill_type="solid", start_color="FFF9C4")
         for idx in range(num_rows):
             start_sec = idx * split_interval
@@ -1090,17 +1592,27 @@ class AudioTranscriptionApp:
             time_label = f"{self.format_time(start_sec)} - {self.format_time(end_sec)}"
             link_path = row_links.get(idx)
             link_name = os.path.basename(link_path) if link_path else ""
-            sheet.append([str(idx), time_label, link_name, '\n'.join(buckets.get(idx, []))])
+            text_value = '\n'.join(buckets.get(idx, []))
+            if show_speaker_column:
+                speaker_label = '、'.join(row_speakers.get(idx, []))
+                sheet.append([str(idx), time_label, speaker_label, link_name, text_value])
+            else:
+                sheet.append([str(idx), time_label, link_name, text_value])
             # 音声ファイルセルから該当区間の分割音声を開けるようにリンクを付与
             if link_path:
-                sheet.cell(row=idx + 2, column=3).hyperlink = link_path
+                sheet.cell(row=idx + 2, column=link_col).hyperlink = link_path
             if idx in low_conf_rows:
-                sheet.cell(row=idx + 2, column=4).fill = low_conf_fill
+                sheet.cell(row=idx + 2, column=text_col).fill = low_conf_fill
         sheet.column_dimensions['A'].width = 6
         sheet.column_dimensions['B'].width = 22
-        sheet.column_dimensions['C'].width = 28
-        sheet.column_dimensions['D'].width = 100
-        for row in sheet.iter_rows(min_row=2, min_col=4, max_col=4):
+        if show_speaker_column:
+            sheet.column_dimensions['C'].width = 16
+            sheet.column_dimensions['D'].width = 28
+            sheet.column_dimensions['E'].width = 100
+        else:
+            sheet.column_dimensions['C'].width = 28
+            sheet.column_dimensions['D'].width = 100
+        for row in sheet.iter_rows(min_row=2, min_col=text_col, max_col=text_col):
             row[0].alignment = Alignment(wrap_text=True, vertical='top')
 
         try:
@@ -1112,16 +1624,54 @@ class AudioTranscriptionApp:
             )
         logger.info(f"Excelファイル {output_file} を保存しました。")
 
+        if diarization_succeeded and segment_speaker_labels is not None:
+            self.write_speakers_output(output_folder, file_name, raw_segments, segment_speaker_labels)
+
         if self.output_txt_var.get():
             self.write_txt_output(output_folder, file_name, buckets, num_rows, split_interval, duration)
         if self.output_srt_var.get():
             self.write_srt_output(output_folder, file_name, raw_segments)
         if self.output_docx_var.get():
-            self.write_docx_output(output_folder, file_name, buckets, num_rows, split_interval, duration, low_conf_rows)
+            self.write_docx_output(output_folder, file_name, buckets, num_rows, split_interval, duration, low_conf_rows,
+                                    row_speakers=row_speakers, show_speaker_column=show_speaker_column)
 
         # 進捗更新: 完了
         self.root.after(0, lambda: self.update_progress(100, 100, f"{prefix}完了！",
                        f"総処理時間: {end_time_all - start_time_all}"))
+
+    def write_speakers_output(self, output_folder, file_name, raw_segments, speaker_labels):
+        """話者分離結果を発言単位（連続する同一話者を1行に結合）でExcel出力する"""
+        rows = []
+        for (seg_start, seg_end, text), speaker in zip(raw_segments, speaker_labels):
+            if rows and rows[-1]['speaker'] == speaker:
+                rows[-1]['end'] = seg_end
+                rows[-1]['texts'].append(text)
+            else:
+                rows.append({'start': seg_start, 'end': seg_end, 'speaker': speaker, 'texts': [text]})
+
+        output_file = os.path.join(output_folder, f"{file_name}_speakers.xlsx")
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.append(['No', '時間帯', '話者', '発言内容'])
+        for i, row in enumerate(rows, start=1):
+            time_label = f"{self.format_time(row['start'])} - {self.format_time(row['end'])}"
+            text_value = '\n'.join(row['texts'])
+            sheet.append([i, time_label, row['speaker'], text_value])
+        sheet.column_dimensions['A'].width = 6
+        sheet.column_dimensions['B'].width = 22
+        sheet.column_dimensions['C'].width = 16
+        sheet.column_dimensions['D'].width = 100
+        for row_cells in sheet.iter_rows(min_row=2, min_col=4, max_col=4):
+            row_cells[0].alignment = Alignment(wrap_text=True, vertical='top')
+
+        try:
+            workbook.save(output_file)
+        except PermissionError:
+            raise RuntimeError(
+                f"Excelファイルを保存できません。\n{output_file}\n"
+                f"このファイルを開いている場合は閉じてから再実行してください。"
+            )
+        logger.info(f"話者別Excelファイル {output_file} を保存しました。")
 
     def write_txt_output(self, output_folder, file_name, buckets, num_rows, split_interval, duration):
         """1分ブロック単位のテキストファイルを出力"""
@@ -1150,8 +1700,10 @@ class AudioTranscriptionApp:
             f.write("\n".join(lines))
         logger.info(f"字幕ファイル {output_file} を保存しました。")
 
-    def write_docx_output(self, output_folder, file_name, buckets, num_rows, split_interval, duration, low_conf_rows):
+    def write_docx_output(self, output_folder, file_name, buckets, num_rows, split_interval, duration, low_conf_rows,
+                           row_speakers=None, show_speaker_column=False):
         """1分ブロック単位のWord文書を出力"""
+        row_speakers = row_speakers or {}
         output_file = os.path.join(output_folder, f"{file_name}_output.docx")
         document = docx.Document()
         document.add_heading(f"文字起こし結果: {file_name}", level=1)
@@ -1163,6 +1715,8 @@ class AudioTranscriptionApp:
             start_sec = idx * split_interval
             end_sec = min((idx + 1) * split_interval, duration)
             heading_text = f"[{self.format_time(start_sec)} - {self.format_time(end_sec)}]"
+            if show_speaker_column and row_speakers.get(idx):
+                heading_text += f" 話者: {'、'.join(row_speakers[idx])}"
             if idx in low_conf_rows:
                 heading_text += " ※要確認"
             heading_para = document.add_paragraph()
@@ -1193,6 +1747,7 @@ class AudioTranscriptionApp:
             f"出力オプション: 分割音声={self.output_split_var.get()}, "
             f"txt={self.output_txt_var.get()}, srt={self.output_srt_var.get()}, "
             f"docx={self.output_docx_var.get()}",
+            f"話者分離: {self.diarization_var.get()} (モデル導入={bool(self.diarization_model_path)})",
         ]
 
         log_dir = os.path.join(get_app_dir(), "logs")
@@ -1217,6 +1772,12 @@ class AudioTranscriptionApp:
 
 
 def main():
+    if "--selftest" in sys.argv:
+        try:
+            setup_logging()
+        except Exception:
+            pass
+        sys.exit(run_selftest())
     try:
         setup_logging()
     except Exception:

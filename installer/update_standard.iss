@@ -1,15 +1,17 @@
 ﻿; -- update_standard.iss --
 ; TND AI議事録アプリ (標準版) 差分更新インストーラー
-; 本体EXEとREADME.txtのみを上書きする（modelsは含まない）。
+; 本体一式（onedir の app\* = EXE + _internal\）と README.txt を上書きする
+; （models は含まない）。models_diarization は v1.6.0 の新規追加物のため
+; 差分更新でも同梱する。
 ; フルインストーラー (setup_standard.iss) と同じ AppId を使うが、
 ; このインストーラー自体はアンインストール登録を行わない
 ; （フル版のアンインストール登録を壊さないため）。
 ;
 ; ビルド例:
-;   ISCC.exe /DAppVersion=1.5.0 /DSourceDir=..\dist\TND_AudioTranscription_v1.5.0 update_standard.iss
+;   ISCC.exe /DAppVersion=1.6.0 /DSourceDir=..\dist\TND_AudioTranscription_v1.6.0 update_standard.iss
 ;
 #ifndef AppVersion
-  #define AppVersion "1.5.0"
+  #define AppVersion "1.6.0"
 #endif
 #ifndef SourceDir
   #define SourceDir "..\dist\TND_AudioTranscription_v" + AppVersion
@@ -46,8 +48,12 @@ RestartApplications=no
 Name: "japanese"; MessagesFile: "compiler:Languages\Japanese.isl"
 
 [Files]
-Source: "{#SourceDir}\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+; PyInstaller onedir 出力一式（本体EXE + _internal\）
+Source: "{#SourceDir}\app\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 Source: "{#SourceDir}\README.txt"; DestDir: "{app}"; Flags: ignoreversion
+; 話者分離モデル（v1.6.0 新規追加。models本体3GB級は差分更新の対象外という
+; 既存の方針を踏襲するが、models_diarizationは新規追加物のため含める）
+Source: "{#SourceDir}\models_diarization\*"; DestDir: "{app}\models_diarization"; Flags: recursesubdirs createallsubdirs ignoreversion nocompression
 
 [Code]
 function NextButtonClick(CurPageID: Integer): Boolean;
