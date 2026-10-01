@@ -8,10 +8,10 @@
 ; （フル版のアンインストール登録を壊さないため）。
 ;
 ; ビルド例:
-;   ISCC.exe /DAppVersion=1.7.0 /DSourceDir=..\dist\TND_AudioTranscription_v1.7.0 update_standard.iss
+;   ISCC.exe /DAppVersion=1.7.2 /DSourceDir=..\dist\TND_AudioTranscription_v1.7.2 update_standard.iss
 ;
 #ifndef AppVersion
-  #define AppVersion "1.7.0"
+  #define AppVersion "1.7.2"
 #endif
 #ifndef SourceDir
   #define SourceDir "..\dist\TND_AudioTranscription_v" + AppVersion

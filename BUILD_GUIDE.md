@@ -1,6 +1,6 @@
-# ビルド手順書 (v1.7.0)
+# ビルド手順書 (v1.7.2)
 
-このドキュメントでは、音声文字起こしアプリ v1.7.0 の配布用パッケージをビルドする手順を説明します。
+このドキュメントでは、音声文字起こしアプリ v1.7.2 の配布用パッケージをビルドする手順を説明します。
 
 v1.6.0 から話者分離（pyannote.audio + PyTorch CPU）とマイク録音（sounddevice）が追加され、
 ビルド構成が大きく変わりました。v1.5.0 以前との主な違い:
@@ -23,6 +23,7 @@ v1.6.0 から話者分離（pyannote.audio + PyTorch CPU）とマイク録音（
   # 開発時に new_env で起動確認する場合は new_env にも同じものを入れる
   new_env\Scripts\python.exe -m pip install customtkinter==6.0.0 darkdetect==0.8.0
   ```
+- ドラッグ＆ドロップ用に **tkinterdnd2==0.6.3** (tkdnd 2.10.2 の win-x64 DLL 同梱) を build_env と new_env に導入済みであること (`<python> -m pip install tkinterdnd2==0.6.3`)
 - Windows 10/11
 - 約15GBの空きディスク容量
 - Inno Setup 6 (`C:\Program Files (x86)\Inno Setup 6\ISCC.exe`)
@@ -64,7 +65,8 @@ D:\whisper\
   `collect_data_files('customtkinter')` で customtkinter の `assets\`（色テーマ JSON
   `themes\*.json`、部品描画用フォント `CustomTkinter_shapes_font.otf`、Roboto フォント、アイコン）を回収。
   これらは .py ではないため import 解析では拾われず、欠けると customtkinter の import 時
-  （テーマ JSON の読込）に失敗して GUI が起動しない
+  （テーマ JSON の読込）に失敗して GUI が起動しない。
+  `collect_data_files('tkinterdnd2')` で tkdnd 拡張 (`_internal\tkinterdnd2\tkdnd\win-x64\` の .tcl と `libtkdnd2.10.2.dll`) を回収。欠けても起動はするが、ドラッグ＆ドロップが無効になる (ログに警告)
 - **hiddenimports**: pyannote は config.yaml のクラス名文字列を importlib で動的解決するため、
   pyannote 系・lightning 系・`scipy._external.array_api_compat` を `collect_submodules` で網羅
 - **excludes**:
@@ -135,7 +137,7 @@ cmd /c mklink /J dist\TND_audio_transcription\models models
 cmd /c mklink /J dist\TND_audio_transcription\models_diarization models_diarization
 dist\TND_audio_transcription\TND_audio_transcription.exe --selftest
 # → 終了コード 0 / logs\selftest_*.log に "RESULT: ALL_OK" が出ること
-#   [OK] faster_whisper / [OK] sounddevice / [OK] pyannote の3項目を確認
+#   [OK] faster_whisper / [OK] sounddevice / [OK] pyannote / [OK] tkdnd の4項目を確認
 
 # 検証後はジャンクションを外す（rmdir はリンクのみ削除、実体は消えない）
 cmd /c rmdir dist\TND_audio_transcription\models
@@ -154,11 +156,12 @@ cmd /c rmdir dist\TND_audio_transcription_turbo\models_diarization
 Remove-Item -Recurse -Force dist\TND_audio_transcription_turbo\logs
 ```
 
-selftest の3項目:
+selftest の4項目:
 
 1. **faster_whisper** … 同梱 Whisper モデルの実体解決（model.bin の存在まで確認）
 2. **sounddevice** … PortAudio DLL のロード + デバイス列挙（マイク0台でも成功）
 3. **pyannote** … 話者分離モデルのロード + 5秒ダミー波形でのパイプライン実行完走
+4. **tkdnd** … 非表示の tk ルートでドラッグ＆ドロップ拡張を読み込み、版文字列を取得（例: `version=2.10.2`）
 
 あわせて ASIO DLL が除去されていることを確認:
 
@@ -181,7 +184,7 @@ Inno Setup の入力ソースとなる、バージョン別の配布用フォル
 onedir 出力は `app\` サブフォルダに丸ごと格納します。
 
 ```powershell
-$v = "1.7.0"
+$v = "1.7.2"
 
 # ---- 標準版 ----
 New-Item -ItemType Directory -Path "dist\TND_AudioTranscription_v$v\app" -Force
@@ -215,7 +218,7 @@ Copy-Item -Recurse "models_diarization" "dist\TND_AudioTranscription_turbo_v$v\m
 完成形（v1.6.0 実測: 標準 約3.7GB / Turbo 約2.3GB）:
 
 ```
-TND_AudioTranscription_v1.7.0/
+TND_AudioTranscription_v1.7.2/
   ├── app/                            # onedir 出力（EXE + _internal\、約770MB）
   │   ├── TND_audio_transcription.exe
   │   └── _internal/
@@ -238,7 +241,7 @@ Step 4 で組み立てた配布用フォルダを入力として、`installer\bu
 
 ```powershell
 cd installer
-.\build_installers.ps1 -Version 1.7.0
+.\build_installers.ps1 -Version 1.7.2
 ```
 
 既定では以下のフォルダをソースとして参照します（`-StandardDir` / `-TurboDir` で明示指定も可能）:
@@ -250,10 +253,10 @@ cd installer
 
 ```
 dist\
-  ├── TND_AudioTranscription-setup-1.7.0.exe          # 標準版フル（約3.2GB）
-  ├── TND_AudioTranscription-update-1.7.0.exe         # 標準版差分更新（約234MB）
-  ├── TND_AudioTranscription_turbo-setup-1.7.0.exe     # Turbo版フル（約1.8GB）
-  └── TND_AudioTranscription_turbo-update-1.7.0.exe    # Turbo版差分更新（約234MB）
+  ├── TND_AudioTranscription-setup-1.7.2.exe          # 標準版フル（約3.2GB）
+  ├── TND_AudioTranscription-update-1.7.2.exe         # 標準版差分更新（約234MB）
+  ├── TND_AudioTranscription_turbo-setup-1.7.2.exe     # Turbo版フル（約1.8GB）
+  └── TND_AudioTranscription_turbo-update-1.7.2.exe    # Turbo版差分更新（約234MB）
 ```
 
 インストーラーの [Files] 構成（v1.6.0〜）:
@@ -274,7 +277,7 @@ Turbo版フルインストーラーで install → selftest → 起動 → unins
 
 ```powershell
 # サイレントインストール
-Start-Process -FilePath "dist\TND_AudioTranscription_turbo-setup-1.7.0.exe" `
+Start-Process -FilePath "dist\TND_AudioTranscription_turbo-setup-1.7.2.exe" `
   -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" -Wait
 
 # インストール先でセルフテスト（終了コード 0 / RESULT: ALL_OK を確認）

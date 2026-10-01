@@ -5,6 +5,7 @@ python-docx
 sounddevice
 pyannote.audio
 customtkinter==6.0.0
+tkinterdnd2==0.6.3
 # torch / torchaudio は配布用に CPU 版を使用すること:
 #   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
 torch

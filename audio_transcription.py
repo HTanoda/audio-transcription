@@ -18,12 +18,14 @@ os.environ.setdefault("PYANNOTE_METRICS_ENABLED", "false")
 import tkinter as tk
 from tkinter import filedialog, messagebox
 import customtkinter as ctk
+from tkinterdnd2 import TkinterDnD, DND_FILES, COPY
 from faster_whisper import WhisperModel
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, PatternFill
 import datetime
 import threading
 import queue
+import uuid
 import wave
 import av
 import docx
@@ -36,7 +38,7 @@ from faster_whisper.audio import decode_audio
 
 # アプリケーション情報
 APP_NAME = "TND_AudioTranscription"
-APP_VERSION = "1.7.0"
+APP_VERSION = "1.7.2"
 APP_TITLE = f"TND audio_transcription v{APP_VERSION}"
 APP_ICON_NAME = "TND_AudioTranscription01.ico"
 
@@ -62,6 +64,9 @@ INITIAL_PROMPT = "こんにちは。本日は、よろしくお願いします�
 RECORD_SAMPLE_RATE = 16000
 RECORD_CHANNELS = 1
 RECORD_DTYPE = "int16"
+
+# ドラッグ＆ドロップで受け付ける音声ファイルの拡張子（ファイル選択ダイアログの絞り込みと同じ）
+AUDIO_EXTENSIONS = (".wav", ".mp3", ".m4a", ".mp4")
 
 # 話者分離（同梱モデルがある場合のみ有効化）
 DIARIZATION_MODEL_DIR = "models_diarization"
@@ -208,6 +213,14 @@ https://github.com/albertosottile/darkdetect
 Apache License 2.0 / BSD 2-Clause License（デュアルライセンス、本アプリは BSD 2-Clause で利用）
 Copyright (c) Donald Stufft and individual contributors.
 https://github.com/pypa/packaging
+
+■ TkinterDnD2（ドラッグ＆ドロップ）
+MIT License  Copyright (c) 2020 Philippe Gagné
+https://github.com/Eliav2/tkinterdnd2
+
+■ tkDnD（ドラッグ＆ドロップの Tcl/Tk 拡張）
+Tcl/Tk 系 BSD スタイルライセンス  Copyright (c) Georgios Petasis
+https://github.com/petasis/tkdnd
 ─────────────────────────────────────\
 """
 
@@ -474,6 +487,7 @@ def run_selftest():
     2. sounddevice: import + query_devices()（入力デバイス0件でも成功。import/DLLエラーのみ失敗）
     3. pyannote.audio: resolve_diarization_model_path() 解決 + Pipeline.from_pretrained() ロード
        + 5秒のダミー波形で pipeline を実行完走できるか（話者0人でも成功）
+    4. tkdnd: 非表示の tk ルートに TkinterDnD.require() で拡張を読み込めるか
 
     結果は logs/selftest_YYYYMMDD_HHMMSS.log に書き出す。
     戻り値は終了コード（0=全成功 / 1=失敗あり）。
@@ -530,6 +544,22 @@ def run_selftest():
         record("pyannote", True, f"path={diarization_path} turns={turn_count}")
     except Exception as e:
         record("pyannote", False, f"{type(e).__name__}: {e}")
+
+    # 4. tkdnd: ドラッグ＆ドロップ拡張の読み込み（ルートは withdraw して表示しない）
+    tk_root = None
+    try:
+        tk_root = tk.Tk()
+        tk_root.withdraw()
+        tkdnd_version = TkinterDnD.require(tk_root)
+        record("tkdnd", True, f"version={tkdnd_version}")
+    except Exception as e:
+        record("tkdnd", False, f"{type(e).__name__}: {e}")
+    finally:
+        if tk_root is not None:
+            try:
+                tk_root.destroy()
+            except Exception:
+                pass
 
     all_ok = all(ok for _, ok, _ in results)
     lines = [
@@ -652,6 +682,12 @@ UI_FONT_FAMILY = "Yu Gothic UI"
 MODEL_SEGMENTED_MAX = 3
 # CTkSwitch の文字の開始位置（スイッチ本体 36 + 間隔 6）。補足文をここに揃える
 SWITCH_TEXT_OFFSET = 42
+INPUT_PLACEHOLDER_TEXT = "ファイルをここにドロップ、または選択"
+OUTPUT_FOLDER_PLACEHOLDER_TEXT = "未指定（音声ファイルと同じフォルダに出力）"
+# 一覧 1 行の高さ（行 24 + 上下の間隔 1 + 1）と、選択ファイル一覧をスクロールなしで見せる最大行数
+LIST_ROW_HEIGHT = 26
+INPUT_LIST_MAX_ROWS = 4
+HOTWORDS_EXPORT_FILE_NAME = "単語登録.txt"
 
 
 def compute_window_width(work_area_width: int) -> int:
@@ -691,11 +727,272 @@ def get_work_area():
         return None
 
 
+def get_window_and_monitor_work_rect(hwnd):
+    """窓の外枠と、窓のあるモニターの作業領域を ((左, 上, 右, 下), (左, 上, 右, 下)) の物理ピクセルで返す。取得できなければ None"""
+    if sys.platform != "win32":
+        return None
+    try:
+        from ctypes import wintypes
+
+        class MONITORINFO(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", wintypes.DWORD),
+                ("rcMonitor", wintypes.RECT),
+                ("rcWork", wintypes.RECT),
+                ("dwFlags", wintypes.DWORD),
+            ]
+
+        user32 = ctypes.WinDLL("user32")
+        user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+        user32.GetWindowRect.restype = wintypes.BOOL
+        user32.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
+        user32.MonitorFromWindow.restype = wintypes.HMONITOR
+        user32.GetMonitorInfoW.argtypes = [wintypes.HMONITOR, ctypes.POINTER(MONITORINFO)]
+        user32.GetMonitorInfoW.restype = wintypes.BOOL
+
+        MONITOR_DEFAULTTONEAREST = 2
+        window_rect = wintypes.RECT()
+        if not user32.GetWindowRect(hwnd, ctypes.byref(window_rect)):
+            return None
+        monitor = user32.MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)
+        info = MONITORINFO()
+        info.cbSize = ctypes.sizeof(MONITORINFO)
+        if not monitor or not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            return None
+        work = info.rcWork
+        return ((window_rect.left, window_rect.top, window_rect.right, window_rect.bottom),
+                (work.left, work.top, work.right, work.bottom))
+    except Exception:
+        logger.warning("窓・モニターの位置の取得に失敗しました", exc_info=True)
+        return None
+
+
+FOLDERID_DESKTOP = "{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}"
+KF_FLAG_DEFAULT = 0
+
+
+def get_known_folder(folder_id_guid):
+    """Windows の既知フォルダの実パスを返す（OneDrive へのリダイレクトも反映される）。取得できなければ None"""
+    if sys.platform != "win32":
+        return None
+    try:
+        from ctypes import wintypes
+
+        class GUID(ctypes.Structure):
+            _fields_ = [
+                ("Data1", wintypes.DWORD),
+                ("Data2", wintypes.WORD),
+                ("Data3", wintypes.WORD),
+                ("Data4", ctypes.c_ubyte * 8),
+            ]
+
+        ole32 = ctypes.WinDLL("ole32")
+        shell32 = ctypes.WinDLL("shell32")
+        ole32.CLSIDFromString.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(GUID)]
+        ole32.CLSIDFromString.restype = ctypes.c_long
+        ole32.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+        ole32.CoTaskMemFree.restype = None
+        shell32.SHGetKnownFolderPath.argtypes = [
+            ctypes.POINTER(GUID), wintypes.DWORD, wintypes.HANDLE, ctypes.POINTER(ctypes.c_void_p)]
+        shell32.SHGetKnownFolderPath.restype = ctypes.c_long
+
+        guid = GUID()
+        if ole32.CLSIDFromString(folder_id_guid, ctypes.byref(guid)) != 0:
+            return None
+        path_ptr = ctypes.c_void_p()
+        hr = shell32.SHGetKnownFolderPath(ctypes.byref(guid), KF_FLAG_DEFAULT, None, ctypes.byref(path_ptr))
+        try:
+            if hr != 0 or not path_ptr.value:
+                return None
+            return ctypes.wstring_at(path_ptr.value)
+        finally:
+            if path_ptr.value:
+                ole32.CoTaskMemFree(path_ptr.value)
+    except Exception:
+        logger.warning("既知フォルダ %s の取得に失敗しました", folder_id_guid, exc_info=True)
+        return None
+
+
+class TaskbarProgress:
+    """Windows タスクバーのボタンに進捗を表示する (ITaskbarList3)。
+
+    UI スレッドからだけ呼ぶこと。失敗したら一度だけ警告を記録し、以後は何もしない（本体の処理に影響させない）。
+    各メソッドは呼び出した API の HRESULT を返す（無効化後・未実行時は None）。
+    """
+
+    CLSID_TASKBAR_LIST = "{56FDF344-FD6D-11d0-958A-006097C9A090}"
+    IID_ITASKBAR_LIST3 = "{EA1AFB91-9E28-4B86-90E9-9E9F8A5EEFAF}"
+    CLSCTX_INPROC_SERVER = 0x1
+    COINIT_APARTMENTTHREADED = 0x2
+    RPC_E_CHANGED_MODE = -2147417850  # 0x80010106
+    # vtable の位置: IUnknown 3 + ITaskbarList 5 + ITaskbarList2 1 の後に ITaskbarList3
+    VTBL_HR_INIT = 3
+    VTBL_SET_PROGRESS_VALUE = 9
+    VTBL_SET_PROGRESS_STATE = 10
+    TBPF_NOPROGRESS = 0
+    TBPF_NORMAL = 2
+    TBPF_ERROR = 4
+    PROGRESS_SCALE = 1000
+
+    def __init__(self, hwnd_getter):
+        self._hwnd_getter = hwnd_getter
+        self._ptr = None
+        self._hwnd = None
+        self._state = None
+        self._disabled = sys.platform != "win32"
+        self._warned = False
+
+    def _fail(self, what, hr=None):
+        self._disabled = True
+        if self._warned:
+            return
+        self._warned = True
+        if hr is None:
+            logger.warning("タスクバーの進捗表示に失敗しました (%s)。以後は表示しません", what, exc_info=True)
+        else:
+            logger.warning("タスクバーの進捗表示に失敗しました (%s, HRESULT=0x%08X)。以後は表示しません",
+                           what, hr & 0xFFFFFFFF)
+
+    def _ensure(self):
+        if self._disabled:
+            return False
+        if self._ptr is not None:
+            return True
+        try:
+            from ctypes import wintypes
+
+            class GUID(ctypes.Structure):
+                _fields_ = [
+                    ("Data1", wintypes.DWORD),
+                    ("Data2", wintypes.WORD),
+                    ("Data3", wintypes.WORD),
+                    ("Data4", ctypes.c_ubyte * 8),
+                ]
+
+            ole32 = ctypes.WinDLL("ole32")
+            ole32.CoInitializeEx.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+            ole32.CoInitializeEx.restype = ctypes.c_long
+            ole32.CLSIDFromString.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(GUID)]
+            ole32.CLSIDFromString.restype = ctypes.c_long
+            ole32.CoCreateInstance.argtypes = [
+                ctypes.POINTER(GUID), ctypes.c_void_p, wintypes.DWORD,
+                ctypes.POINTER(GUID), ctypes.POINTER(ctypes.c_void_p)]
+            ole32.CoCreateInstance.restype = ctypes.c_long
+
+            # Tk のスレッドは STA。既に別の方式で初期化済み (RPC_E_CHANGED_MODE) でもそのまま使える
+            hr = ole32.CoInitializeEx(None, self.COINIT_APARTMENTTHREADED)
+            if hr < 0 and hr != self.RPC_E_CHANGED_MODE:
+                self._fail("CoInitializeEx", hr)
+                return False
+
+            clsid = GUID()
+            iid = GUID()
+            hr = ole32.CLSIDFromString(self.CLSID_TASKBAR_LIST, ctypes.byref(clsid))
+            if hr < 0:
+                self._fail("CLSIDFromString", hr)
+                return False
+            hr = ole32.CLSIDFromString(self.IID_ITASKBAR_LIST3, ctypes.byref(iid))
+            if hr < 0:
+                self._fail("CLSIDFromString", hr)
+                return False
+            ptr = ctypes.c_void_p()
+            hr = ole32.CoCreateInstance(
+                ctypes.byref(clsid), None, self.CLSCTX_INPROC_SERVER, ctypes.byref(iid), ctypes.byref(ptr))
+            if hr < 0 or not ptr.value:
+                self._fail("CoCreateInstance", hr)
+                return False
+            self._ptr = ptr
+
+            hr = self._call(self.VTBL_HR_INIT, ())
+            if hr < 0:
+                self._ptr = None
+                self._fail("HrInit", hr)
+                return False
+
+            user32 = ctypes.WinDLL("user32")
+            user32.GetParent.argtypes = [wintypes.HWND]
+            user32.GetParent.restype = wintypes.HWND
+            hwnd = user32.GetParent(self._hwnd_getter())
+            if not hwnd:
+                self._ptr = None
+                self._fail("GetParent", 0)
+                return False
+            self._hwnd = hwnd
+            return True
+        except Exception:
+            self._ptr = None
+            self._fail("初期化")
+            return False
+
+    def _call(self, index, argtypes, *args):
+        vtbl = ctypes.cast(self._ptr, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+        prototype = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, *argtypes)
+        return prototype(vtbl[index])(self._ptr, *args)
+
+    def _set_state(self, state):
+        if self._state == state:
+            return 0
+        hr = self._call(self.VTBL_SET_PROGRESS_STATE, (ctypes.c_void_p, ctypes.c_int), self._hwnd, state)
+        if hr < 0:
+            self._fail("SetProgressState", hr)
+            return hr
+        self._state = state
+        return hr
+
+    def set_progress(self, current, total):
+        if total <= 0 or not self._ensure():
+            return None
+        try:
+            hr = self._set_state(self.TBPF_NORMAL)
+            if hr < 0:
+                return hr
+            completed = int(round(min(max(current / total, 0.0), 1.0) * self.PROGRESS_SCALE))
+            hr = self._call(
+                self.VTBL_SET_PROGRESS_VALUE, (ctypes.c_void_p, ctypes.c_ulonglong, ctypes.c_ulonglong),
+                self._hwnd, completed, self.PROGRESS_SCALE)
+            if hr < 0:
+                self._fail("SetProgressValue", hr)
+            return hr
+        except Exception:
+            self._fail("SetProgressValue")
+            return None
+
+    def set_error(self):
+        if not self._ensure():
+            return None
+        try:
+            return self._set_state(self.TBPF_ERROR)
+        except Exception:
+            self._fail("SetProgressState")
+            return None
+
+    def clear(self):
+        if self._disabled or self._ptr is None:
+            return None
+        try:
+            return self._set_state(self.TBPF_NOPROGRESS)
+        except Exception:
+            self._fail("SetProgressState")
+            return None
+
+
+class DnDRoot(ctk.CTk, TkinterDnD.DnDWrapper):
+    """ドラッグ＆ドロップを受け付けられる CTk ルート（tkdnd を読めない環境では D&D なしで動く）"""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        try:
+            self.TkdndVersion = TkinterDnD.require(self)
+        except Exception:
+            self.TkdndVersion = None
+            logger.warning("ドラッグ＆ドロップ機能 (tkdnd) を読み込めませんでした。ファイル選択ボタンのみ使用できます", exc_info=True)
+
+
 class AudioTranscriptionApp:
     def __init__(self):
         ctk.set_appearance_mode("system")
         ctk.set_default_color_theme("blue")
-        self.root = ctk.CTk()
+        self.root = DnDRoot()
         self.root.title(APP_TITLE)
         self.root.resizable(True, True)
 
@@ -744,8 +1041,12 @@ class AudioTranscriptionApp:
         self.check_model()
 
         self.setup_ui()
+        self.setup_drop_target()
         self.populate_hotwords_listbox()
         self.apply_initial_geometry()
+        self.taskbar = TaskbarProgress(self.root.winfo_id)
+        # 処理中のファイル番号と総数（タスクバーの進捗をバッチ全体で出すため。UI スレッドだけが読み書きする）
+        self._batch_pos = (1, 1)
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -911,6 +1212,7 @@ class AudioTranscriptionApp:
         self.font_heading = ctk.CTkFont(family=UI_FONT_FAMILY, size=15, weight="bold")
         self.font_body = ctk.CTkFont(family=UI_FONT_FAMILY, size=13)
         self.font_note = ctk.CTkFont(family=UI_FONT_FAMILY, size=11)
+        self.font_small = ctk.CTkFont(family=UI_FONT_FAMILY, size=12)
         self.font_primary = ctk.CTkFont(family=UI_FONT_FAMILY, size=14, weight="bold")
         root_fg_color = ctk.ThemeManager.theme["CTk"]["fg_color"]
 
@@ -1002,6 +1304,7 @@ class AudioTranscriptionApp:
 
         # 音声の入力（ファイル選択とマイク録音）
         input_card, _ = self._make_card(left_col, "音声の入力")
+        self.input_card = input_card
 
         file_row = ctk.CTkFrame(input_card, fg_color="transparent", corner_radius=0)
         file_row.pack(fill=tk.X, padx=16)
@@ -1009,11 +1312,28 @@ class AudioTranscriptionApp:
         self.file_btn = ctk.CTkButton(
             file_row, text="ファイルを選択...", width=124, font=self.font_body,
             command=self.select_input_file, **OUTLINE_BUTTON_STYLE)
-        self.file_btn.pack(side=tk.RIGHT, padx=(10, 0))
+        self.file_btn.pack(side=tk.RIGHT, padx=(8, 0))
+
+        self.clear_input_btn = ctk.CTkButton(
+            file_row, text="クリア", width=0, font=self.font_body, state="disabled",
+            command=lambda: self._set_input_files([]), **OUTLINE_BUTTON_STYLE)
+        self.clear_input_btn.pack(side=tk.RIGHT, padx=(10, 0))
 
         self.file_label = ctk.CTkLabel(file_row, font=self.font_body, anchor="w")
-        self._set_path_label(self.file_label, "ファイルが選択されていません", placeholder=True)
+        self._set_path_label(self.file_label, INPUT_PLACEHOLDER_TEXT, placeholder=True)
         self.file_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.file_row = file_row
+
+        # 2 件以上選んだときだけ表示する選択ファイルの一覧（1 件以下では pack_forget して高さを戻す）
+        self.input_list_frame = ctk.CTkScrollableFrame(
+            input_card, height=LIST_ROW_HEIGHT * 2, corner_radius=8, fg_color=LIST_FG_COLOR)
+        input_list_scrollbar = getattr(self.input_list_frame, "_scrollbar", None)
+        if input_list_scrollbar is not None:
+            input_list_scrollbar.configure(height=20)
+        else:
+            logger.warning("選択ファイル一覧のスクロールバーを取得できませんでした（customtkinter の内部構造が変わった可能性）")
+        self.input_list_visible = False
+        self.input_file_rows = []
 
         record_btn_row = ctk.CTkFrame(input_card, fg_color="transparent", corner_radius=0)
         record_btn_row.pack(fill=tk.X, padx=16, pady=(10, 0))
@@ -1047,7 +1367,7 @@ class AudioTranscriptionApp:
         self.folder_btn.pack(side=tk.RIGHT, padx=(10, 0))
 
         self.folder_label = ctk.CTkLabel(folder_row, font=self.font_body, anchor="w")
-        self._set_path_label(self.folder_label, "フォルダが選択されていません", placeholder=True)
+        self._set_path_label(self.folder_label, OUTPUT_FOLDER_PLACEHOLDER_TEXT, placeholder=True)
         self.folder_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         # モデル選択（検出されたモデルが2つ以上の場合のみ表示）
@@ -1118,8 +1438,8 @@ class AudioTranscriptionApp:
         self.add_btn.pack(side=tk.LEFT, padx=(8, 0))
 
         self.hotwords_list_frame = ctk.CTkScrollableFrame(
-            hotwords_card, height=80, corner_radius=8, fg_color=LIST_FG_COLOR)
-        self.hotwords_list_frame.pack(fill=tk.BOTH, expand=True, padx=16, pady=(10, 16))
+            hotwords_card, height=64, corner_radius=8, fg_color=LIST_FG_COLOR)
+        self.hotwords_list_frame.pack(fill=tk.BOTH, expand=True, padx=16, pady=(10, 8))
         # 内蔵スクロールバーは既定で高さ 200 を要求し、一覧の height 指定より優先されてしまう。
         # 公開 API が無いため内部属性で要求高さだけを下げる（表示時は一覧の高さまで伸びる）
         list_scrollbar = getattr(self.hotwords_list_frame, "_scrollbar", None)
@@ -1129,6 +1449,18 @@ class AudioTranscriptionApp:
             logger.warning("単語一覧のスクロールバーを取得できませんでした（customtkinter の内部構造が変わった可能性）。"
                            "一覧の初期高さが大きくなります")
         self.hotword_rows = []
+
+        hotwords_tools_row = ctk.CTkFrame(hotwords_card, fg_color="transparent", corner_radius=0)
+        hotwords_tools_row.pack(fill=tk.X, padx=16, pady=(0, 16))
+        self.hotwords_tools_row = hotwords_tools_row
+        self.hotwords_export_btn = ctk.CTkButton(
+            hotwords_tools_row, text="書き出し", command=self.export_hotwords, font=self.font_small,
+            height=26, width=0, **OUTLINE_BUTTON_STYLE)
+        self.hotwords_export_btn.pack(side=tk.LEFT)
+        self.hotwords_import_btn = ctk.CTkButton(
+            hotwords_tools_row, text="取り込み", command=self.import_hotwords, font=self.font_small,
+            height=26, width=0, **OUTLINE_BUTTON_STYLE)
+        self.hotwords_import_btn.pack(side=tk.LEFT, padx=(8, 0))
 
         # 出力オプション
         output_card, _ = self._make_card(right_col, "出力オプション")
@@ -1195,6 +1527,62 @@ class AudioTranscriptionApp:
             height=max(event.height, self.scroll_content.winfo_reqheight()))
         self.update_scroll_bar_visibility()
 
+    def refit_scroll_content(self):
+        """内容の必要高さが変わったとき（選択ファイル一覧の表示・非表示）に、内容の高さとスクロール範囲を合わせ直す。
+
+        内容の高さは窓の <Configure> でしか更新されないため、窓の大きさが変わらない変化はここで反映する。
+        """
+        self.root.update_idletasks()
+        self.scroll_canvas.itemconfigure(
+            self.scroll_window_id,
+            height=max(self.scroll_canvas.winfo_height(), self.scroll_content.winfo_reqheight()))
+        self.root.update_idletasks()
+        self.scroll_canvas.configure(scrollregion=self.scroll_canvas.bbox('all'))
+        self.update_scroll_bar_visibility()
+
+    def _fit_window_to_content(self):
+        """内容が窓より高くなったとき、作業領域に収まる範囲で窓を高くする（縮めない・最大化中は何もしない）。
+
+        寸法は apply_initial_geometry と同じく、物理ピクセルを DPI 倍率で割った論理ピクセルで扱う。
+        geometry() の位置 (+x+y) は customtkinter が倍率を掛けないため物理ピクセルのまま。
+        """
+        try:
+            if self.root.state() == "zoomed":
+                return
+            self.root.update_idletasks()
+            scaling = ctk.ScalingTracker.get_window_scaling(self.root)
+            content_px = (
+                self.scroll_content.winfo_reqheight()
+                + self.bottom_frame.winfo_reqheight()
+                + self.bottom_separator.winfo_reqheight()
+            )
+            needed_height = math.ceil(content_px / scaling)
+            m = re.match(r"^(\d+)x(\d+)\+(-?\d+)\+(-?\d+)$", self.root.geometry())
+            if not m:
+                return
+            width, current_height, x, y = (int(v) for v in m.groups())
+            if needed_height <= current_height:
+                return
+            work_area_px = get_work_area()
+            if work_area_px is not None:
+                work_area_height = int(work_area_px[1] / scaling)
+            else:
+                work_area_height = self.root.winfo_screenheight()
+            new_height = max(WINDOW_MIN_HEIGHT, min(needed_height, work_area_height - WINDOW_CHROME_MARGIN))
+            if new_height <= current_height:
+                return
+            # 下端が窓のあるモニターの作業領域からはみ出すなら、はみ出す分だけ上に寄せる
+            rects = get_window_and_monitor_work_rect(ctypes.windll.user32.GetParent(self.root.winfo_id()))
+            if rects is not None:
+                window_rect, work_rect = rects
+                new_bottom = window_rect[3] + round((new_height - current_height) * scaling)
+                if new_bottom > work_rect[3]:
+                    y = max(work_rect[1], y - (new_bottom - work_rect[3]))
+            self.root.geometry(f"{width}x{new_height}+{x}+{y}")
+            logger.info(f"選択ファイル一覧の表示に合わせて窓の高さを {current_height} → {new_height} にしました")
+        except Exception:
+            logger.warning("窓の高さの調整に失敗しました", exc_info=True)
+
     def is_scroll_content_overflowing(self):
         return self.scroll_content.winfo_reqheight() > self.scroll_canvas.winfo_height()
 
@@ -1223,12 +1611,13 @@ class AudioTranscriptionApp:
             ancestor_path = str(ancestor)
             return widget_path == ancestor_path or widget_path.startswith(ancestor_path + ".")
 
-        # スクロール領域外（ダイアログ等）と、単語リストが自前でスクロールできるときは対象外
+        # スクロール領域外（ダイアログ等）と、単語リスト・選択ファイル一覧が自前でスクロールできるときは対象外
         if not is_within(self.scroll_canvas):
             return
-        list_canvas = self.hotwords_list_frame.master
-        if is_within(list_canvas.master) and list_canvas.yview() != (0.0, 1.0):
-            return
+        for list_frame in (self.hotwords_list_frame, self.input_list_frame):
+            list_canvas = list_frame.master
+            if is_within(list_canvas.master) and list_canvas.yview() != (0.0, 1.0):
+                return
         self.scroll_canvas.yview_scroll(-int(event.delta / 120), 'units')
 
     def cancel_processing(self):
@@ -1243,19 +1632,32 @@ class AudioTranscriptionApp:
         sec = int(seconds)
         return f"{sec // 60:02d}:{sec % 60:02d}"
 
+    def _recording_save_dir(self):
+        """録音ファイルの保存先（出力フォルダ → デスクトップ → ホーム）"""
+        if self.output_folder_path:
+            return self.output_folder_path
+        desktop = get_known_folder(FOLDERID_DESKTOP)
+        if desktop and os.path.isdir(desktop):
+            return desktop
+        return os.path.expanduser("~")
+
+    def _resolve_output_dir(self, file_path):
+        """出力先フォルダ（出力フォルダが指定されていればそこ、未指定なら音声ファイルのあるフォルダ）"""
+        if self.output_folder_path:
+            return self.output_folder_path
+        return os.path.dirname(os.path.abspath(file_path))
+
     def start_recording(self):
         """マイク録音を開始する"""
         if self.is_processing or self.is_recording:
             return
-        if not self.output_folder_path:
-            messagebox.showwarning("警告", "出力フォルダを選択してください。")
-            return
+        save_dir = self._recording_save_dir()
 
         file_name = f"録音_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.wav"
-        output_path = os.path.join(self.output_folder_path, file_name)
+        output_path = os.path.join(save_dir, file_name)
 
         try:
-            os.makedirs(self.output_folder_path, exist_ok=True)
+            os.makedirs(save_dir, exist_ok=True)
             wave_file = wave.open(output_path, 'wb')
             wave_file.setnchannels(RECORD_CHANNELS)
             wave_file.setsampwidth(2)
@@ -1264,7 +1666,7 @@ class AudioTranscriptionApp:
             logger.exception(f"録音ファイルを作成できませんでした: {output_path}")
             messagebox.showerror(
                 "エラー",
-                "録音ファイルを作成できませんでした。\n出力フォルダの権限を確認してください。"
+                f"録音ファイルを作成できませんでした。\n保存先フォルダの権限を確認してください。\n{save_dir}"
             )
             return
 
@@ -1317,7 +1719,7 @@ class AudioTranscriptionApp:
         self.is_recording = True
         self.record_start_dt = datetime.datetime.now()
         self._set_recording_ui(True)
-        logger.info(f"録音を開始しました: {output_path}")
+        logger.info(f"録音を開始しました: {output_path} (保存先フォルダ: {save_dir})")
         self._poll_recording()
 
     def _poll_recording(self):
@@ -1375,10 +1777,13 @@ class AudioTranscriptionApp:
         logger.info(f"録音を保存しました: {output_path}")
         if on_close:
             return
-        self.input_file_paths = [output_path]
-        display_path = output_path if len(output_path) < 50 else "..." + output_path[-47:]
-        self._set_path_label(self.file_label, display_path, placeholder=False)
-        if messagebox.askyesno("録音完了", "録音を保存しました。このまま文字起こしを開始しますか？"):
+        self._add_input_files([output_path], remember=False)
+        count = len(self.input_file_paths)
+        question = (f"選択中の {count} 件をこのまま文字起こししますか？" if count >= 2
+                    else "このまま文字起こしを開始しますか？")
+        if messagebox.askyesno(
+                "録音完了",
+                f"録音を保存しました。\n保存先: {os.path.dirname(output_path)}\n\n{question}"):
             self.start_processing()
 
     def select_input_file(self):
@@ -1386,26 +1791,185 @@ class AudioTranscriptionApp:
         file_paths = filedialog.askopenfilenames(
             title="音声ファイルを選択（複数選択可）",
             filetypes=filetypes,
-            initialdir='./'
+            initialdir=self._default_browse_dir("input")
         )
         if file_paths:
-            self.input_file_paths = list(file_paths)
-            if len(self.input_file_paths) == 1:
-                file_path = self.input_file_paths[0]
-                # 長いパスは省略表示
-                display_path = file_path if len(file_path) < 50 else "..." + file_path[-47:]
-                self._set_path_label(self.file_label, display_path, placeholder=False)
+            self._add_input_files(file_paths)
+
+    def _default_browse_dir(self, kind):
+        """選択ダイアログの初期フォルダ（前回の場所 → [出力のみ] 入力ファイルの場所 → デスクトップ → ホーム）"""
+        if kind == "output":
+            candidates = [self.settings.get("last_output_dir")]
+            if self.input_file_paths:
+                candidates.append(os.path.dirname(os.path.normpath(self.input_file_paths[0])))
+        else:
+            candidates = [self.settings.get("last_input_dir")]
+        candidates.append(get_known_folder(FOLDERID_DESKTOP))
+        for path in candidates:
+            if isinstance(path, str) and path and os.path.isdir(path):
+                return path
+        return os.path.expanduser("~")
+
+    def _remember_browse_dir(self, key, folder):
+        """選んだフォルダを次回のダイアログの初期フォルダとして設定に保存する"""
+        if not folder or self.settings.get(key) == folder:
+            return
+        self.settings[key] = folder
+        try:
+            save_settings(self.settings)
+        except OSError:
+            logger.warning("設定ファイルへの %s の保存に失敗しました", key, exc_info=True)
+
+    def _set_input_files(self, paths):
+        """入力ファイルを設定し、ファイル表示（1 件ならパス、2 件以上なら件数と一覧）を更新する"""
+        self.input_file_paths = list(paths)
+        if self.input_file_paths:
+            self._remember_browse_dir(
+                "last_input_dir", os.path.dirname(os.path.normpath(self.input_file_paths[0])))
+        self._refresh_input_files_view()
+
+    def _add_input_files(self, paths, remember=True):
+        """選択中のファイルに paths を追加する（同じファイルは大文字小文字・区切り文字の違いも含めて 1 つにし、順序は保つ）。
+
+        追加した件数を返す。0 件（すべて選択済み）のときは表示を変えず、状態欄で知らせるだけにする。
+        """
+        def key(p):
+            return os.path.normcase(os.path.normpath(p))
+
+        known = {key(p) for p in self.input_file_paths}
+        new_paths = []
+        for p in paths:
+            k = key(p)
+            if k not in known:
+                known.add(k)
+                new_paths.append(p)
+        if not new_paths:
+            self._show_transient_status("既に選択済みです")
+            return 0
+        self.input_file_paths = self.input_file_paths + new_paths
+        if remember:
+            self._remember_browse_dir("last_input_dir", os.path.dirname(os.path.normpath(new_paths[0])))
+        self._refresh_input_files_view()
+        return len(new_paths)
+
+    def _show_transient_status(self, text, ms=2000):
+        """処理中でなければ状態欄に text を少しの間だけ出す"""
+        if self.is_processing:
+            return
+        previous = self.status_label.cget("text")
+        self.status_label.configure(text=text)
+
+        def restore():
+            if not self.is_processing and self.status_label.cget("text") == text:
+                self.status_label.configure(text=previous)
+
+        self.root.after(ms, restore)
+
+    def _refresh_input_files_view(self):
+        """self.input_file_paths に合わせてファイル表示ラベルと選択ファイル一覧を作り直す"""
+        count = len(self.input_file_paths)
+        if count == 0:
+            self._set_path_label(self.file_label, INPUT_PLACEHOLDER_TEXT, placeholder=True)
+        elif count == 1:
+            file_path = self.input_file_paths[0]
+            # 長いパスは省略表示
+            display_path = file_path if len(file_path) < 50 else "..." + file_path[-47:]
+            self._set_path_label(self.file_label, display_path, placeholder=False)
+        else:
+            self._set_path_label(self.file_label, f"{count} 件選択", placeholder=False)
+        self._update_clear_button_state()
+
+        for row, _remove_btn in self.input_file_rows:
+            row.destroy()
+        self.input_file_rows = []
+        if count >= 2:
+            enabled = not (self.is_processing or self.is_recording)
+            for index, file_path in enumerate(self.input_file_paths):
+                self.input_file_rows.append(self._make_list_row(
+                    self.input_list_frame, os.path.basename(file_path),
+                    lambda i=index: self._remove_input_file(i), enabled))
+            self.input_list_frame.configure(height=LIST_ROW_HEIGHT * min(count, INPUT_LIST_MAX_ROWS))
+            if not self.input_list_visible:
+                self.input_list_frame.pack(fill=tk.X, padx=16, pady=(8, 0), after=self.file_row)
+                self.input_list_visible = True
+            self.input_list_frame.master.yview_moveto(0)
+        elif self.input_list_visible:
+            self.input_list_frame.pack_forget()
+            self.input_list_visible = False
+        self.refit_scroll_content()
+        self._fit_window_to_content()
+
+    def _update_clear_button_state(self):
+        """「クリア」は選択が 1 件以上あり、処理中・録音中でないときだけ押せる"""
+        enabled = bool(self.input_file_paths) and not (self.is_processing or self.is_recording)
+        self.clear_input_btn.configure(state=tk.NORMAL if enabled else tk.DISABLED)
+
+    def _remove_input_file(self, index):
+        """選択ファイル一覧の ✕ で、該当ファイルを入力から外す"""
+        if self.is_processing or self.is_recording:
+            return
+        if 0 <= index < len(self.input_file_paths):
+            del self.input_file_paths[index]
+            self._refresh_input_files_view()
+
+    def setup_drop_target(self):
+        """ウィンドウ全体を音声ファイルのドロップ先にする（tkdnd を読めなかった場合は何もしない）"""
+        if self.root.TkdndVersion is None:
+            return
+        try:
+            self.root.drop_target_register(DND_FILES)
+            self.root.dnd_bind("<<DropEnter>>", self.on_drop_enter)
+            self.root.dnd_bind("<<DropLeave>>", self.on_drop_leave)
+            self.root.dnd_bind("<<Drop>>", self.on_drop_files)
+        except tk.TclError:
+            logger.warning("ドロップ先の登録に失敗しました。ファイル選択ボタンのみ使用できます", exc_info=True)
+
+    def _set_drop_highlight(self, active):
+        if active:
+            self.input_card.configure(
+                border_width=2, border_color=ctk.ThemeManager.theme["CTkButton"]["fg_color"])
+        else:
+            self.input_card.configure(border_width=0)
+
+    def on_drop_enter(self, event):
+        if not (self.is_processing or self.is_recording):
+            self._set_drop_highlight(True)
+        return COPY
+
+    def on_drop_leave(self, event):
+        self._set_drop_highlight(False)
+
+    def on_drop_files(self, event):
+        """ドロップされたファイルのうち対応する音声ファイルだけを入力に設定する"""
+        self._set_drop_highlight(False)
+        if self.is_processing or self.is_recording:
+            return COPY
+        paths = []
+        other_files = 0
+        for path in self.root.tk.splitlist(event.data):
+            if os.path.isdir(path) or os.path.splitext(path)[1].lower() == ".lnk":
+                continue
+            if os.path.splitext(path)[1].lower() in AUDIO_EXTENSIONS:
+                paths.append(os.path.normpath(path))
             else:
-                first_name = os.path.basename(self.input_file_paths[0])
-                self._set_path_label(
-                    self.file_label,
-                    f"{len(self.input_file_paths)} 件選択: {first_name} ほか",
-                    placeholder=False,
-                )
+                other_files += 1
+        if not paths:
+            if other_files:
+                messagebox.showwarning("警告", "対応していないファイルです。wav / mp3 / m4a / mp4 を選択してください。")
+            else:
+                messagebox.showwarning(
+                    "警告",
+                    "フォルダやショートカットはドロップできません。音声ファイル (wav / mp3 / m4a / mp4) を選んでください。")
+            return COPY
+        added = self._add_input_files(paths)
+        logger.info(f"ドロップで入力ファイルを {added} 件追加しました（選択中 {len(self.input_file_paths)} 件）")
+        return COPY
 
     def select_output_folder(self):
-        folder_path = filedialog.askdirectory(title="出力するフォルダを選択", initialdir='./')
+        folder_path = filedialog.askdirectory(
+            title="出力するフォルダを選択", initialdir=self._default_browse_dir("output"))
         if folder_path:
+            self._remember_browse_dir("last_output_dir", os.path.normpath(folder_path))
             self.output_folder_path = folder_path
             display_path = folder_path if len(folder_path) < 50 else "..." + folder_path[-47:]
             self._set_path_label(self.folder_label, display_path, placeholder=False)
@@ -1427,17 +1991,22 @@ class AudioTranscriptionApp:
 
     def _add_hotword_row(self, word):
         """単語 1 つ分の行（単語 + 右端の削除ボタン）を一覧の末尾に足す"""
-        row = ctk.CTkFrame(self.hotwords_list_frame, fg_color="transparent", corner_radius=0)
+        row, remove_btn = self._make_list_row(
+            self.hotwords_list_frame, word, lambda w=word: self.remove_hotword(w), not self.is_processing)
+        self.hotword_rows.append((word, row, remove_btn))
+
+    def _make_list_row(self, list_frame, text, on_remove, enabled):
+        """一覧の末尾に 1 行（文字 + 右端の ✕ ボタン）を足し、(行, ✕ ボタン) を返す"""
+        row = ctk.CTkFrame(list_frame, fg_color="transparent", corner_radius=0)
         row.pack(fill=tk.X, padx=(6, 0), pady=1)
         remove_btn = ctk.CTkButton(
             row, text="✕", width=28, height=24, font=self.font_body,
             fg_color="transparent", text_color=NOTE_TEXT_COLOR,
-            command=lambda w=word: self.remove_hotword(w),
-            state="disabled" if self.is_processing else "normal")
+            command=on_remove, state="normal" if enabled else "disabled")
         remove_btn.pack(side=tk.RIGHT)
-        ctk.CTkLabel(row, text=word, font=self.font_body, height=24, anchor="w").pack(
+        ctk.CTkLabel(row, text=text, font=self.font_body, height=24, anchor="w").pack(
             side=tk.LEFT, fill=tk.X, expand=True)
-        self.hotword_rows.append((word, row, remove_btn))
+        return row, remove_btn
 
     def update_hotwords_count(self):
         """登録数カウンターを更新"""
@@ -1476,6 +2045,111 @@ class AudioTranscriptionApp:
         save_hotwords(self.hotwords_list)
         self.populate_hotwords_listbox()
 
+    def export_hotwords(self):
+        """登録済み単語をテキストファイル（1 行 1 語、UTF-8 BOM 付き・CRLF）に書き出す"""
+        if not self.hotwords_list:
+            messagebox.showinfo("情報", "登録された単語がありません")
+            return
+        path = filedialog.asksaveasfilename(
+            title="単語登録を書き出し",
+            initialdir=self._default_browse_dir("output"),
+            initialfile=HOTWORDS_EXPORT_FILE_NAME,
+            defaultextension=".txt",
+            filetypes=[("テキストファイル", "*.txt")],
+        )
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8-sig", newline="") as f:
+                f.write("".join(f"{word}\r\n" for word in self.hotwords_list))
+        except OSError:
+            logger.exception(f"単語登録の書き出しに失敗しました: {path}")
+            messagebox.showerror(
+                "エラー",
+                f"単語登録の書き出しに失敗しました。\n{path}\n\n"
+                f"詳細はログ (logs/app-YYYYMMDD.log) を確認してください。"
+            )
+            return
+        logger.info(f"単語登録 {len(self.hotwords_list)} 件を書き出しました: {path}")
+        messagebox.showinfo("書き出し", f"{len(self.hotwords_list)} 件を書き出しました。")
+
+    def import_hotwords(self):
+        """テキストファイル（1 行 1 語）の単語を登録に追加する（空行・重複・上限超過分は除く）"""
+        path = filedialog.askopenfilename(
+            title="単語登録を取り込み",
+            initialdir=self._default_browse_dir("output"),
+            filetypes=[("テキストファイル", "*.txt")],
+        )
+        if not path:
+            return
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+        except OSError:
+            logger.exception(f"単語登録ファイルを読み込めませんでした: {path}")
+            messagebox.showerror(
+                "エラー",
+                f"ファイルを読み込めませんでした。\n{path}\n\n"
+                f"詳細はログ (logs/app-YYYYMMDD.log) を確認してください。"
+            )
+            return
+        try:
+            if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
+                text = data.decode("utf-16")
+            else:
+                try:
+                    text = data.decode("utf-8-sig")
+                except UnicodeDecodeError:
+                    text = data.decode("cp932")
+        except UnicodeDecodeError:
+            logger.warning(f"単語登録ファイルの文字コードを判別できませんでした: {path}")
+            messagebox.showerror(
+                "エラー",
+                "ファイルの文字コードを読み取れませんでした。\nUTF-8 または Shift_JIS のテキストファイルを選択してください。"
+            )
+            return
+
+        added = 0
+        duplicates = 0
+        over_limit = 0
+        invalid = 0
+        seen = set()
+        for line in text.splitlines():
+            word = line.strip()
+            if not word:
+                continue
+            # BOM なし UTF-16 を UTF-8 として読んだ場合などは NUL 等の制御文字が混じる
+            if any(ord(c) < 32 for c in word):
+                invalid += 1
+                continue
+            if word in seen or word in self.hotwords_list:
+                duplicates += 1
+                continue
+            seen.add(word)
+            if len(self.hotwords_list) >= MAX_HOTWORDS:
+                over_limit += 1
+            else:
+                self.hotwords_list.append(word)
+                added += 1
+
+        if added:
+            try:
+                save_hotwords(self.hotwords_list)
+            except OSError:
+                logger.exception("単語登録の保存に失敗しました")
+                messagebox.showerror(
+                    "エラー",
+                    "取り込んだ単語を保存できませんでした。今回の起動中のみ有効です。\n"
+                    "詳細はログ (logs/app-YYYYMMDD.log) を確認してください。"
+                )
+            self.populate_hotwords_listbox()
+        logger.info(f"単語登録を取り込みました: 追加 {added} 件, 重複 {duplicates} 件, 上限超過 {over_limit} 件, "
+                    f"不正な行 {invalid} 件 ({path})")
+        messagebox.showinfo(
+            "取り込み",
+            f"{added} 件を取り込みました（重複 {duplicates} 件、上限超過 {over_limit} 件、不正な行 {invalid} 件はスキップ）"
+        )
+
     def get_hotwords_string(self):
         """登録済み単語をhotwordsパラメータ用の文字列に変換"""
         if not self.hotwords_list:
@@ -1498,12 +2172,16 @@ class AudioTranscriptionApp:
         self.settings["diarization"] = self.diarization_var.get()
         save_settings(self.settings)
 
-    def update_progress(self, current, total, status_text, detail_text=""):
-        """プログレスバーと状態表示を更新"""
+    def update_progress(self, current, total, status_text, detail_text="", taskbar=True):
+        """プログレスバーと状態表示を更新（taskbar=False のときはタスクバーの進捗に触れない）"""
         progress_value = (current / total) * 100 if total > 0 else 0
         self._set_bar(self.progress_bar, progress_value / 100)
         self.status_label.configure(text=status_text)
         self.progress_detail.configure(text=detail_text)
+        if taskbar and total > 0:
+            # タスクバーはバッチ全体の進み具合（画面のバーはファイルごと）
+            file_index, file_count = self._batch_pos
+            self.taskbar.set_progress((file_index - 1) * total + current, file_count * total)
         self.root.update_idletasks()
 
     def set_ui_state(self, enabled):
@@ -1515,6 +2193,13 @@ class AudioTranscriptionApp:
         self.add_btn.configure(state=state)
         for _word, _row, remove_btn in self.hotword_rows:
             remove_btn.configure(state=state)
+        self.hotwords_export_btn.configure(state=state)
+        self.hotwords_import_btn.configure(state=state)
+        input_remove_state = tk.NORMAL if (enabled and not self.is_recording) else tk.DISABLED
+        for _row, remove_btn in self.input_file_rows:
+            remove_btn.configure(state=input_remove_state)
+        self.clear_input_btn.configure(
+            state=tk.NORMAL if (enabled and self.input_file_paths and not self.is_recording) else tk.DISABLED)
         self.hotword_entry.configure(state=state)
         self.output_split_check.configure(state=state)
         self.output_txt_check.configure(state=state)
@@ -1534,6 +2219,10 @@ class AudioTranscriptionApp:
         self.file_btn.configure(state=lock_state)
         self.folder_btn.configure(state=lock_state)
         self.run_btn.configure(state=lock_state)
+        for _row, remove_btn in self.input_file_rows:
+            remove_btn.configure(state=lock_state)
+        self.clear_input_btn.configure(
+            state=tk.NORMAL if (not recording and self.input_file_paths) else tk.DISABLED)
         self.record_start_btn.configure(state=tk.DISABLED if recording else tk.NORMAL)
         self.record_stop_btn.configure(state=tk.NORMAL if recording else tk.DISABLED)
 
@@ -1544,14 +2233,24 @@ class AudioTranscriptionApp:
         if not self.input_file_paths:
             messagebox.showwarning("警告", "入力ファイルを選択してください。")
             return
-        if not self.output_folder_path:
-            messagebox.showwarning("警告", "出力フォルダを選択してください。")
-            return
+
+        for output_dir in dict.fromkeys(self._resolve_output_dir(p) for p in self.input_file_paths):
+            # tempfile.NamedTemporaryFile は書き込み拒否 (ACL) のフォルダで名前を変えて再試行を続け、
+            # 1 分以上戻らない（Windows の os.access が ACL を見ないため）。1 回だけ作って消す
+            probe_path = os.path.join(output_dir, f".write_test_{os.getpid()}_{uuid.uuid4().hex}.tmp")
+            try:
+                os.makedirs(output_dir, exist_ok=True)
+                fd = os.open(probe_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_TEMPORARY)
+                os.close(fd)
+            except OSError as e:
+                logger.warning(f"出力先に書き込めません: {output_dir} ({e})")
+                messagebox.showerror("エラー", f"出力先 {output_dir} に書き込めません。出力フォルダを指定してください。")
+                return
 
         existing_names = []
         for file_path in self.input_file_paths:
             file_name = os.path.splitext(os.path.basename(file_path))[0]
-            output_file = os.path.join(self.output_folder_path, f"{file_name}_output.xlsx")
+            output_file = os.path.join(self._resolve_output_dir(file_path), f"{file_name}_output.xlsx")
             if os.path.exists(output_file):
                 existing_names.append(f"{file_name}_output.xlsx")
         if existing_names:
@@ -1578,11 +2277,19 @@ class AudioTranscriptionApp:
         model = None
         diarization_pipeline = None
         want_diarization = bool(self.diarization_var.get() and self.diarization_model_path)
+        last_output_dir = None
+        output_dirs = []
+        # 完了・キャンセルの通知を予約したか（予約していれば、タスクバーの進捗はその通知の側で消す）
+        outcome_scheduled = False
         try:
             for file_index, file_path in enumerate(self.input_file_paths, start=1):
                 if self.cancel_event.is_set():
                     raise ProcessingCancelled()
                 file_name = os.path.basename(file_path)
+                output_dir = self._resolve_output_dir(file_path)
+                last_output_dir = output_dir
+                # 書き換えは UI スレッドの after 経由にして、前のファイルの進捗更新より後に反映させる
+                self.root.after(0, lambda pos=(file_index, file_count): setattr(self, "_batch_pos", pos))
                 try:
                     if model is None:
                         self.root.after(0, lambda: self.update_progress(
@@ -1612,41 +2319,71 @@ class AudioTranscriptionApp:
                             want_diarization = False
                             diarization_pipeline = None
                     self.transcribe_file(
-                        model, file_path, self.output_folder_path,
+                        model, file_path, output_dir,
                         file_index=file_index, file_count=file_count,
                         diarization_pipeline=diarization_pipeline if want_diarization else None
                     )
                     succeeded += 1
+                    if output_dir not in output_dirs:
+                        output_dirs.append(output_dir)
                 except ProcessingCancelled:
                     raise
                 except Exception:
                     logger.exception(f"文字起こし処理に失敗しました: {file_path}")
                     failed_names.append(file_name)
 
-            self.root.after(0, lambda: self.on_process_complete(file_count, succeeded, failed_names))
+            self.root.after(0, lambda: self.on_process_complete(
+                file_count, succeeded, failed_names, last_output_dir, output_dirs))
+            outcome_scheduled = True
         except ProcessingCancelled:
             logger.info("ユーザー操作により処理がキャンセルされました。")
-            self.root.after(0, lambda: messagebox.showinfo("キャンセル", "処理をキャンセルしました。"))
+            self.root.after(0, self.on_process_cancelled)
+            outcome_scheduled = True
         finally:
             self.is_processing = False
             self.root.after(0, lambda: self.set_ui_state(True))
-            self.root.after(0, lambda: self.update_progress(0, 1, "待機中...", ""))
+            self.root.after(0, lambda: self.update_progress(0, 1, "待機中...", "", taskbar=False))
+            if not outcome_scheduled:
+                self.root.after(0, self.taskbar.clear)
 
-    def on_process_complete(self, file_count, succeeded, failed_names):
+    def on_process_cancelled(self):
+        """キャンセル完了時の処理"""
+        self.taskbar.clear()
+        messagebox.showinfo("キャンセル", "処理をキャンセルしました。")
+
+    @staticmethod
+    def format_output_dirs(output_dirs, limit=5):
+        """完了ダイアログに載せる出力先フォルダの一覧（limit 件を超えたら「ほか N 件」）"""
+        if not output_dirs:
+            return ""
+        lines = list(output_dirs[:limit])
+        if len(output_dirs) > limit:
+            lines.append(f"ほか {len(output_dirs) - limit} 件")
+        return "\n\n出力先:\n" + "\n".join(lines)
+
+    def on_process_complete(self, file_count, succeeded, failed_names, last_output_dir=None, output_dirs=None):
         """処理完了時の処理"""
         self.notify_completion()
+        dirs_text = self.format_output_dirs(output_dirs or [])
         if not failed_names:
-            messagebox.showinfo("完了", "処理が完了しました。")
+            self.taskbar.clear()
+            messagebox.showinfo("完了", f"処理が完了しました。{dirs_text}")
         else:
+            self.taskbar.set_error()
             names_text = "\n".join(failed_names)
             messagebox.showwarning(
                 "完了",
                 f"{file_count}件中{succeeded}件成功。\n失敗: {names_text}\n\n"
-                f"詳細はログファイル (logs フォルダ) を確認してください。"
+                f"詳細はログファイル (logs フォルダ) を確認してください。{dirs_text}"
             )
-        # 出力フォルダを開く
-        if self.output_folder_path:
-            os.startfile(self.output_folder_path)
+            self.taskbar.clear()
+        # 出力先フォルダを開く（未指定時は最後に処理したファイルの出力先）
+        open_dir = self.output_folder_path or last_output_dir
+        if open_dir:
+            try:
+                os.startfile(open_dir)
+            except OSError:
+                logger.warning(f"出力先フォルダを開けませんでした: {open_dir}", exc_info=True)
 
     def notify_completion(self):
         """処理完了を音とタスクバー点滅で通知する"""
@@ -1742,7 +2479,7 @@ class AudioTranscriptionApp:
         os.makedirs(output_folder, exist_ok=True)
 
         start_time_all = datetime.datetime.now()
-        logger.info(f"処理開始: {file_path}")
+        logger.info(f"処理開始: {file_path} (出力先: {output_folder})")
 
         transcribe_params = dict(
             beam_size=5,
