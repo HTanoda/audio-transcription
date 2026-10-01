@@ -5,10 +5,10 @@
 ; 話者分離モデル（models_diarization）も同梱する。
 ;
 ; ビルド例:
-;   ISCC.exe /DAppVersion=1.6.0 /DSourceDir=..\dist\TND_AudioTranscription_turbo_v1.6.0 setup_turbo.iss
+;   ISCC.exe /DAppVersion=1.7.0 /DSourceDir=..\dist\TND_AudioTranscription_turbo_v1.7.0 setup_turbo.iss
 ;
 #ifndef AppVersion
-  #define AppVersion "1.6.0"
+  #define AppVersion "1.7.0"
 #endif
 #ifndef SourceDir
   #define SourceDir "..\dist\TND_AudioTranscription_turbo_v" + AppVersion
@@ -51,6 +51,8 @@ Name: "desktopicon"; Description: "デスクトップにショートカットを
 ; PyInstaller onedir 出力一式（本体EXE + _internal\）
 Source: "{#SourceDir}\app\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 Source: "{#SourceDir}\README.txt"; DestDir: "{app}"; Flags: ignoreversion
+; 同梱ライブラリのライセンス全文（BSD/MIT の添付条件）。相対パスはこの .iss のフォルダ基準
+Source: "..\THIRD_PARTY_LICENSES.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\{#MyAppIcoName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\models\*"; DestDir: "{app}\models"; Flags: recursesubdirs createallsubdirs ignoreversion nocompression
 Source: "{#SourceDir}\models_diarization\*"; DestDir: "{app}\models_diarization"; Flags: recursesubdirs createallsubdirs ignoreversion nocompression

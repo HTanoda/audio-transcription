@@ -1,6 +1,6 @@
-# ビルド手順書 (v1.6.0)
+# ビルド手順書 (v1.7.0)
 
-このドキュメントでは、音声文字起こしアプリ v1.6.0 の配布用パッケージをビルドする手順を説明します。
+このドキュメントでは、音声文字起こしアプリ v1.7.0 の配布用パッケージをビルドする手順を説明します。
 
 v1.6.0 から話者分離（pyannote.audio + PyTorch CPU）とマイク録音（sounddevice）が追加され、
 ビルド構成が大きく変わりました。v1.5.0 以前との主な違い:
@@ -16,6 +16,13 @@ v1.6.0 から話者分離（pyannote.audio + PyTorch CPU）とマイク録音（
 ## 前提条件
 
 - Python 3.12（`build_env` に導入済み）
+- `build_env` に GUI ライブラリ **customtkinter==6.0.0** と、その依存 **darkdetect==0.8.0** を導入済みであること
+  （開発機で一度だけ実施。本番機はオフラインのため、これらは EXE に同梱して持ち込む）:
+  ```powershell
+  build_env\Scripts\python.exe -m pip install customtkinter==6.0.0 darkdetect==0.8.0
+  # 開発時に new_env で起動確認する場合は new_env にも同じものを入れる
+  new_env\Scripts\python.exe -m pip install customtkinter==6.0.0 darkdetect==0.8.0
+  ```
 - Windows 10/11
 - 約15GBの空きディスク容量
 - Inno Setup 6 (`C:\Program Files (x86)\Inno Setup 6\ISCC.exe`)
@@ -53,7 +60,11 @@ D:\whisper\
 - **onedir 構成**: `EXE(..., exclude_binaries=True, upx=False)` + `COLLECT(..., upx=False)`。
   **UPX は絶対に有効化しないこと**（torch の DLL が壊れる）
 - **datas**: onnxruntime / faster_whisper の VAD 資材は `build_env/...` から取得。
-  `collect_data_files('pyannote.audio')` で telemetry/config.yaml 等の非 .py データを回収
+  `collect_data_files('pyannote.audio')` で telemetry/config.yaml 等の非 .py データを回収。
+  `collect_data_files('customtkinter')` で customtkinter の `assets\`（色テーマ JSON
+  `themes\*.json`、部品描画用フォント `CustomTkinter_shapes_font.otf`、Roboto フォント、アイコン）を回収。
+  これらは .py ではないため import 解析では拾われず、欠けると customtkinter の import 時
+  （テーマ JSON の読込）に失敗して GUI が起動しない
 - **hiddenimports**: pyannote は config.yaml のクラス名文字列を importlib で動的解決するため、
   pyannote 系・lightning 系・`scipy._external.array_api_compat` を `collect_submodules` で網羅
 - **excludes**:
@@ -156,13 +167,21 @@ selftest の3項目:
 Get-ChildItem -Recurse dist\TND_audio_transcription\_internal -Filter "*asio*"
 ```
 
+customtkinter の色テーマ JSON が同梱されていることを確認（`--selftest` は GUI を起動しないため、
+ここで確認する）:
+
+```powershell
+# blue.json / dark-blue.json / gold.json / green.json の 4 つが表示されれば OK
+Get-ChildItem dist\TND_audio_transcription\_internal\customtkinter\assets\themes -Filter "*.json"
+```
+
 ### Step 4: 配布用フォルダの作成
 
 Inno Setup の入力ソースとなる、バージョン別の配布用フォルダを組み立てます。
 onedir 出力は `app\` サブフォルダに丸ごと格納します。
 
 ```powershell
-$v = "1.6.0"
+$v = "1.7.0"
 
 # ---- 標準版 ----
 New-Item -ItemType Directory -Path "dist\TND_AudioTranscription_v$v\app" -Force
@@ -196,7 +215,7 @@ Copy-Item -Recurse "models_diarization" "dist\TND_AudioTranscription_turbo_v$v\m
 完成形（v1.6.0 実測: 標準 約3.7GB / Turbo 約2.3GB）:
 
 ```
-TND_AudioTranscription_v1.6.0/
+TND_AudioTranscription_v1.7.0/
   ├── app/                            # onedir 出力（EXE + _internal\、約770MB）
   │   ├── TND_audio_transcription.exe
   │   └── _internal/
@@ -206,8 +225,11 @@ TND_AudioTranscription_v1.6.0/
   └── models_diarization/             # 話者分離モデル（約32MB）
 ```
 
-> **注:** ライセンス情報はアプリ内メニュー「ヘルプ」→「ライセンス情報」から確認できるため、
-> 配布パッケージには `THIRD_PARTY_LICENSES.txt` を含めません（リポジトリにのみ置く）。
+> **注:** 同梱ライブラリのライセンス全文 `THIRD_PARTY_LICENSES.txt` は `{app}`（EXE と同じフォルダ）に
+> 同梱します（BSD/MIT の「バイナリ配布時にライセンス文を添付する」条件のため）。
+> インストーラーの [Files] がリポジトリ直下の `THIRD_PARTY_LICENSES.txt` を直接参照する
+> （`Source: "..\THIRD_PARTY_LICENSES.txt"`、.iss のフォルダ基準）ので、上の配布用フォルダへのコピーは不要です。
+> アプリ内では画面最下段の「ライセンス情報」→「全文を開く」で表示できます。
 
 ### Step 5: Inno Setup によるインストーラー作成
 
@@ -216,7 +238,7 @@ Step 4 で組み立てた配布用フォルダを入力として、`installer\bu
 
 ```powershell
 cd installer
-.\build_installers.ps1 -Version 1.6.0
+.\build_installers.ps1 -Version 1.7.0
 ```
 
 既定では以下のフォルダをソースとして参照します（`-StandardDir` / `-TurboDir` で明示指定も可能）:
@@ -228,10 +250,10 @@ cd installer
 
 ```
 dist\
-  ├── TND_AudioTranscription-setup-1.6.0.exe          # 標準版フル（約3.2GB）
-  ├── TND_AudioTranscription-update-1.6.0.exe         # 標準版差分更新（約234MB）
-  ├── TND_AudioTranscription_turbo-setup-1.6.0.exe     # Turbo版フル（約1.8GB）
-  └── TND_AudioTranscription_turbo-update-1.6.0.exe    # Turbo版差分更新（約234MB）
+  ├── TND_AudioTranscription-setup-1.7.0.exe          # 標準版フル（約3.2GB）
+  ├── TND_AudioTranscription-update-1.7.0.exe         # 標準版差分更新（約234MB）
+  ├── TND_AudioTranscription_turbo-setup-1.7.0.exe     # Turbo版フル（約1.8GB）
+  └── TND_AudioTranscription_turbo-update-1.7.0.exe    # Turbo版差分更新（約234MB）
 ```
 
 インストーラーの [Files] 構成（v1.6.0〜）:
@@ -252,7 +274,7 @@ Turbo版フルインストーラーで install → selftest → 起動 → unins
 
 ```powershell
 # サイレントインストール
-Start-Process -FilePath "dist\TND_AudioTranscription_turbo-setup-1.6.0.exe" `
+Start-Process -FilePath "dist\TND_AudioTranscription_turbo-setup-1.7.0.exe" `
   -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" -Wait
 
 # インストール先でセルフテスト（終了コード 0 / RESULT: ALL_OK を確認）

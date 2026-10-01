@@ -1,6 +1,7 @@
 import os
 import re
 import sys
+import math
 import json
 import logging
 
@@ -15,7 +16,8 @@ os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 os.environ.setdefault("PYANNOTE_METRICS_ENABLED", "false")
 
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox
+import customtkinter as ctk
 from faster_whisper import WhisperModel
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, PatternFill
@@ -34,7 +36,7 @@ from faster_whisper.audio import decode_audio
 
 # アプリケーション情報
 APP_NAME = "TND_AudioTranscription"
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.7.0"
 APP_TITLE = f"TND audio_transcription v{APP_VERSION}"
 APP_ICON_NAME = "TND_AudioTranscription01.ico"
 
@@ -48,6 +50,8 @@ MAX_HOTWORDS = 50
 
 # アプリ設定ファイル名
 SETTINGS_FILE = "settings.json"
+# 同梱ライブラリのライセンス全文（インストーラーが EXE と同じフォルダに置く）
+THIRD_PARTY_LICENSES_FILE = "THIRD_PARTY_LICENSES.txt"
 DEFAULT_MODEL_NAME = "large-v3"
 
 # 句読点を打たせるための呼び水プロンプト（句読点付きの文を与えることで
@@ -191,6 +195,19 @@ https://github.com/spatialaudio/python-sounddevice
 ■ PortAudio（マイク録音の音声入出力ライブラリ）
 MIT License  Copyright (c) 1999-2011 Ross Bencina and Phil Burk
 https://www.portaudio.com/
+
+■ CustomTkinter（画面部品）
+MIT License  Copyright (c) 2023 Tom Schimansky
+https://github.com/TomSchimansky/CustomTkinter
+
+■ darkdetect（ライト/ダーク表示の判定）
+BSD 3-Clause License  Copyright (c) 2019, Alberto Sottile
+https://github.com/albertosottile/darkdetect
+
+■ packaging
+Apache License 2.0 / BSD 2-Clause License（デュアルライセンス、本アプリは BSD 2-Clause で利用）
+Copyright (c) Donald Stufft and individual contributors.
+https://github.com/pypa/packaging
 ─────────────────────────────────────\
 """
 
@@ -611,11 +628,75 @@ def resource_path(relative_path):
     return os.path.join(os.path.abspath("."), relative_path)
 
 
+# ウィンドウ寸法はすべて論理ピクセル（customtkinter が geometry() に DPI 倍率を掛ける）
+WINDOW_WIDTH = 920
+WINDOW_MIN_WIDTH = 640
+WINDOW_MIN_HEIGHT = 420
+# タイトルバー + 余白
+WINDOW_CHROME_MARGIN = 60
+
+# 色は (ライト, ダーク) の組
+PLACEHOLDER_FOREGROUND = ("gray45", "gray60")
+NOTE_TEXT_COLOR = ("gray40", "gray60")
+CARD_FG_COLOR = ("gray94", "gray16")
+LIST_FG_COLOR = ("gray99", "gray20")
+SEPARATOR_COLOR = ("gray80", "gray30")
+OUTLINE_BUTTON_STYLE = dict(
+    fg_color="transparent",
+    border_width=1,
+    border_color=("gray70", "gray35"),
+    text_color=("gray10", "gray90"),
+)
+UI_FONT_FAMILY = "Yu Gothic UI"
+# モデル数がこれ以下ならセグメント、超えたらドロップダウンで選ばせる
+MODEL_SEGMENTED_MAX = 3
+# CTkSwitch の文字の開始位置（スイッチ本体 36 + 間隔 6）。補足文をここに揃える
+SWITCH_TEXT_OFFSET = 42
+
+
+def compute_window_width(work_area_width: int) -> int:
+    """作業領域の幅に収まるウィンドウ幅（初期幅と最小幅の両方に使う）"""
+    return max(WINDOW_MIN_WIDTH, min(WINDOW_WIDTH, work_area_width - WINDOW_CHROME_MARGIN))
+
+
+def compute_initial_geometry(work_area_width: int, work_area_height: int, content_height: int) -> str:
+    """内容の必要高さと作業領域の大きさから初期ウィンドウサイズ (WxH) を決める"""
+    width = compute_window_width(work_area_width)
+    height = max(WINDOW_MIN_HEIGHT, min(content_height, work_area_height - WINDOW_CHROME_MARGIN))
+    return f"{width}x{height}"
+
+
+def get_work_area():
+    """Windows の作業領域 (タスクバーを除く) の (幅, 高さ) を物理ピクセルで返す。取得できなければ None"""
+    if sys.platform != "win32":
+        return None
+    try:
+        class RECT(ctypes.Structure):
+            _fields_ = [
+                ("left", ctypes.c_long),
+                ("top", ctypes.c_long),
+                ("right", ctypes.c_long),
+                ("bottom", ctypes.c_long),
+            ]
+
+        rect = RECT()
+        SPI_GETWORKAREA = 0x0030
+        if not ctypes.windll.user32.SystemParametersInfoW(SPI_GETWORKAREA, 0, ctypes.byref(rect), 0):
+            return None
+        width = rect.right - rect.left
+        height = rect.bottom - rect.top
+        return (width, height) if width > 0 and height > 0 else None
+    except Exception:
+        logger.warning("作業領域の取得に失敗しました", exc_info=True)
+        return None
+
+
 class AudioTranscriptionApp:
     def __init__(self):
-        self.root = tk.Tk()
+        ctk.set_appearance_mode("system")
+        ctk.set_default_color_theme("blue")
+        self.root = ctk.CTk()
         self.root.title(APP_TITLE)
-        self.root.geometry("500x940")
         self.root.resizable(True, True)
 
         self.input_file_paths = []
@@ -636,6 +717,9 @@ class AudioTranscriptionApp:
         self.record_level = 0
         self.record_error = None
         self.record_poll_id = None
+
+        # 開いているライセンス情報・ヘルプのダイアログ（二重に開かないため）
+        self._text_dialog = None
 
         self.available_models = detect_models()
         self.selected_model_name = self.settings.get("model_name") or (
@@ -659,11 +743,38 @@ class AudioTranscriptionApp:
         # モデルの存在確認
         self.check_model()
 
-        self.setup_menu()
         self.setup_ui()
         self.populate_hotwords_listbox()
+        self.apply_initial_geometry()
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def apply_initial_geometry(self):
+        """内容が収まる大きさ（作業領域を超えない範囲）でウィンドウを開き、最小サイズも作業領域に合わせる。
+
+        winfo_reqheight() と作業領域は物理ピクセルなので、DPI 倍率で割って論理ピクセルにしてから渡す。
+        """
+        self.root.update_idletasks()
+        scaling = ctk.ScalingTracker.get_window_scaling(self.root)
+        content_px = (
+            self.scroll_content.winfo_reqheight()
+            + self.bottom_frame.winfo_reqheight()
+            + self.bottom_separator.winfo_reqheight()
+        )
+        # 切り捨てると 1px はみ出してスクロールバーが出るため切り上げる
+        content_height = math.ceil(content_px / scaling)
+        work_area_px = get_work_area()
+        if work_area_px is not None:
+            work_area_width = int(work_area_px[0] / scaling)
+            work_area_height = int(work_area_px[1] / scaling)
+        else:
+            # Tk は customtkinter がプロセスを DPI 対応にする前に画面サイズを取得するため、
+            # winfo_screen* は既に論理ピクセル（125% の実測: 1728 = 2160 / 1.25）。倍率で割らない
+            work_area_width = self.root.winfo_screenwidth()
+            work_area_height = self.root.winfo_screenheight()
+        # CTk.geometry() は最小サイズで幅・高さを丸めるため、最小サイズを先に設定する
+        self.root.minsize(compute_window_width(work_area_width), WINDOW_MIN_HEIGHT)
+        self.root.geometry(compute_initial_geometry(work_area_width, work_area_height, content_height))
 
     def on_close(self):
         """ウィンドウを閉じる際の処理（処理中・録音中は確認する）"""
@@ -711,63 +822,55 @@ class AudioTranscriptionApp:
             )
             sys.exit(1)
 
-    def setup_menu(self):
-        """メニューバーを作成"""
-        menubar = tk.Menu(self.root)
-        self.root.config(menu=menubar)
-
-        # ヘルプメニュー
-        help_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="ヘルプ", menu=help_menu)
-        help_menu.add_command(label="単語登録機能について", command=self.show_hotwords_help)
-        help_menu.add_separator()
-        help_menu.add_command(label="サポート情報をコピー", command=self.copy_support_info)
-        help_menu.add_separator()
-        help_menu.add_command(label="ライセンス情報", command=self.show_license_info)
-
     def show_license_info(self):
         """ライセンス情報ダイアログを表示"""
-        dialog = tk.Toplevel(self.root)
-        dialog.title("ライセンス情報")
-        dialog.geometry("560x450")
-        dialog.resizable(True, True)
-        dialog.transient(self.root)
-        dialog.grab_set()
-
-        # アイコンの設定
-        icon_path = os.path.join(get_app_dir(), APP_ICON_NAME)
-        if os.path.exists(icon_path):
-            try:
-                dialog.iconbitmap(icon_path)
-            except tk.TclError:
-                pass
-
-        frame = ttk.Frame(dialog, padding="10")
-        frame.pack(fill=tk.BOTH, expand=True)
-
-        text_widget = tk.Text(frame, wrap=tk.WORD, font=("", 9))
-        text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=text_widget.yview)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        text_widget.config(yscrollcommand=scrollbar.set)
-
-        text_widget.insert(tk.END, LICENSE_TEXT)
-        text_widget.config(state=tk.DISABLED)
-
-        close_btn = ttk.Button(dialog, text="閉じる", command=dialog.destroy)
-        close_btn.pack(pady=(0, 10))
+        full_text_exists = os.path.exists(os.path.join(get_app_dir(), THIRD_PARTY_LICENSES_FILE))
+        self._open_text_dialog(
+            "ライセンス情報", "560x450", LICENSE_TEXT, font_size=12,
+            extra_button=("全文を開く", self.open_third_party_licenses, full_text_exists))
 
     def show_hotwords_help(self):
         """単語登録機能ヘルプダイアログを表示"""
-        dialog = tk.Toplevel(self.root)
-        dialog.title("単語登録機能について")
-        dialog.geometry("500x420")
+        self._open_text_dialog("単語登録機能について", "500x420", HOTWORDS_HELP_TEXT, font_size=13)
+
+    def open_third_party_licenses(self):
+        """同梱ライブラリのライセンス全文 (THIRD_PARTY_LICENSES.txt) を既定のアプリで開く"""
+        path = os.path.join(get_app_dir(), THIRD_PARTY_LICENSES_FILE)
+        try:
+            os.startfile(path)
+        except OSError:
+            logger.exception(f"ライセンス全文を開けませんでした: {path}")
+            messagebox.showerror(
+                "エラー",
+                f"ファイルを開けませんでした。\n{path}\n\n"
+                f"詳細はログ (logs/app-YYYYMMDD.log) を確認してください。",
+                parent=self._text_dialog or self.root,
+            )
+
+    def _open_text_dialog(self, title, geometry, text, font_size, extra_button=None):
+        """読み取り専用の文章と「閉じる」ボタンのモーダルダイアログを開く（開いていれば前面に出すだけ）。
+
+        extra_button に (文言, コマンド, 有効か) を渡すと「閉じる」の左に副ボタンを置く。
+        """
+        if self._text_dialog is not None and self._text_dialog.winfo_exists():
+            self._text_dialog.lift()
+            self._text_dialog.focus_set()
+            return
+
+        dialog = ctk.CTkToplevel(self.root)
+        self._text_dialog = dialog
+
+        def close():
+            self._text_dialog = None
+            dialog.destroy()
+
+        dialog.protocol("WM_DELETE_WINDOW", close)
+        dialog.title(title)
+        dialog.geometry(geometry)
         dialog.resizable(True, True)
         dialog.transient(self.root)
-        dialog.grab_set()
 
-        # アイコンの設定
+        # アイコンの設定（設定しないと customtkinter 既定のアイコンに差し替えられる）
         icon_path = os.path.join(get_app_dir(), APP_ICON_NAME)
         if os.path.exists(icon_path):
             try:
@@ -775,191 +878,364 @@ class AudioTranscriptionApp:
             except tk.TclError:
                 pass
 
-        frame = ttk.Frame(dialog, padding="10")
-        frame.pack(fill=tk.BOTH, expand=True)
+        button_row = ctk.CTkFrame(dialog, fg_color="transparent", corner_radius=0)
+        button_row.pack(side=tk.BOTTOM, pady=(0, 16))
+        if extra_button is not None:
+            extra_text, extra_command, extra_enabled = extra_button
+            ctk.CTkButton(
+                button_row, text=extra_text, font=self.font_body, command=extra_command,
+                state="normal" if extra_enabled else "disabled", **OUTLINE_BUTTON_STYLE,
+            ).pack(side=tk.LEFT, padx=(0, 8))
+        close_btn = ctk.CTkButton(button_row, text="閉じる", font=self.font_body, command=close)
+        close_btn.pack(side=tk.LEFT)
 
-        text_widget = tk.Text(frame, wrap=tk.WORD, font=("", 10))
-        text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        text_widget = ctk.CTkTextbox(
+            dialog, wrap="word", font=ctk.CTkFont(family=UI_FONT_FAMILY, size=font_size))
+        text_widget.pack(fill=tk.BOTH, expand=True, padx=16, pady=(16, 12))
+        text_widget.insert("1.0", text)
+        text_widget.configure(state="disabled")
 
-        scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=text_widget.yview)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        text_widget.config(yscrollcommand=scrollbar.set)
+        # CTkToplevel は生成直後にいったん非表示になるため、表示されてからモーダルにする
+        def make_modal():
+            if not dialog.winfo_exists():
+                return
+            try:
+                dialog.grab_set()
+                dialog.focus_set()
+            except tk.TclError:
+                dialog.after(50, make_modal)
 
-        text_widget.insert(tk.END, HOTWORDS_HELP_TEXT)
-        text_widget.config(state=tk.DISABLED)
-
-        close_btn = ttk.Button(dialog, text="閉じる", command=dialog.destroy)
-        close_btn.pack(pady=(0, 10))
+        dialog.after(50, make_modal)
 
     def setup_ui(self):
-        # メインフレーム
-        main_frame = ttk.Frame(self.root, padding="20")
-        main_frame.pack(fill=tk.BOTH, expand=True)
-        
-        # 入力ファイル選択
-        file_frame = ttk.LabelFrame(main_frame, text="入力ファイル", padding="10")
-        file_frame.pack(fill=tk.X, pady=(0, 10))
+        self.font_heading = ctk.CTkFont(family=UI_FONT_FAMILY, size=15, weight="bold")
+        self.font_body = ctk.CTkFont(family=UI_FONT_FAMILY, size=13)
+        self.font_note = ctk.CTkFont(family=UI_FONT_FAMILY, size=11)
+        self.font_primary = ctk.CTkFont(family=UI_FONT_FAMILY, size=14, weight="bold")
+        root_fg_color = ctk.ThemeManager.theme["CTk"]["fg_color"]
 
-        self.file_btn = ttk.Button(file_frame, text="選択", command=self.select_input_file)
+        # 処理状況 + 操作（画面が低くても見えるよう、スクロール領域の外の最下部に固定）
+        self.bottom_frame = ctk.CTkFrame(self.root, fg_color="transparent", corner_radius=0)
+        self.bottom_frame.pack(side=tk.BOTTOM, fill=tk.X)
+
+        status_row = ctk.CTkFrame(self.bottom_frame, fg_color="transparent", corner_radius=0)
+        status_row.pack(fill=tk.X, padx=20, pady=(8, 2))
+
+        self.progress_detail = ctk.CTkLabel(
+            status_row, text="", font=self.font_note, text_color=NOTE_TEXT_COLOR)
+        self.progress_detail.pack(side=tk.RIGHT)
+
+        self.status_label = ctk.CTkLabel(status_row, text="待機中...", font=self.font_body, anchor="w")
+        self.status_label.pack(side=tk.LEFT)
+
+        action_row = ctk.CTkFrame(self.bottom_frame, fg_color="transparent", corner_radius=0)
+        action_row.pack(fill=tk.X, padx=20, pady=(0, 8))
+
+        # ヘルプ（メニューバーの代わりに文字リンクを並べる）
+        link_row = ctk.CTkFrame(self.bottom_frame, fg_color="transparent", corner_radius=0)
+        # ボタン内側の余白 (約 6) の分だけ左を詰め、文字の左端を上の行に揃える
+        link_row.pack(fill=tk.X, padx=(14, 20), pady=(0, 10))
+        for i, (text, command) in enumerate((
+            ("単語登録について", self.show_hotwords_help),
+            ("サポート情報をコピー", self.copy_support_info),
+            ("ライセンス情報", self.show_license_info),
+        )):
+            ctk.CTkButton(
+                link_row, text=text, command=command, font=self.font_note,
+                fg_color="transparent", hover_color=CARD_FG_COLOR, text_color=NOTE_TEXT_COLOR,
+                height=22, width=0,
+            ).pack(side=tk.LEFT, padx=(0 if i == 0 else 12, 0))
+
+        self.progress_bar = ctk.CTkProgressBar(action_row)
+        self._set_bar(self.progress_bar, 0)
+
+        self.run_btn = ctk.CTkButton(
+            action_row, text="文字起こし開始", height=38, font=self.font_primary,
+            command=self.start_processing)
+
+        self.cancel_btn = ctk.CTkButton(
+            action_row, text="キャンセル", height=38, width=110, font=self.font_body,
+            command=self.cancel_processing, state="disabled", **OUTLINE_BUTTON_STYLE)
+
+        self.cancel_btn.pack(side=tk.RIGHT)
+        self.run_btn.pack(side=tk.RIGHT, padx=(0, 8))
+        self.progress_bar.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 16))
+
+        # 高さ 1 では角丸矩形が描かれないため、背景色 (bg_color) 側で線を塗る
+        self.bottom_separator = ctk.CTkFrame(
+            self.root, height=1, corner_radius=0, fg_color=SEPARATOR_COLOR, bg_color=SEPARATOR_COLOR)
+        self.bottom_separator.pack(side=tk.BOTTOM, fill=tk.X)
+
+        # スクロール領域
+        self.scroll_canvas = tk.Canvas(
+            self.root, highlightthickness=0, bd=0,
+            bg=self.root._apply_appearance_mode(root_fg_color))
+        self.scroll_bar = ctk.CTkScrollbar(self.root, command=self.scroll_canvas.yview)
+        self.scroll_canvas.configure(yscrollcommand=self.scroll_bar.set)
+        self.scroll_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # Tab キーの移動順を「上の内容 → 最下段の操作」にする（移動順は兄弟ウィジェットの重なり順に従う）
+        self.bottom_frame.lift()
+        # tk.Canvas はライト/ダークの切り替えに追従しないため、背景色を自前で塗り直す
+        ctk.AppearanceModeTracker.add(self._on_appearance_mode_changed, self.root)
+
+        # メインフレーム
+        # 親が tk.Canvas だと背景色が起動時の色で固定されるため、bg_color も明示してライト/ダークに追従させる
+        main_frame = ctk.CTkFrame(
+            self.scroll_canvas, corner_radius=0, fg_color=root_fg_color, bg_color=root_fg_color)
+        self.scroll_window_id = self.scroll_canvas.create_window((0, 0), window=main_frame, anchor='nw')
+        self.scroll_content = main_frame
+
+        # CTkFrame.bind は内部の描画用 Canvas に付くため、フレーム自身の <Configure> に追加で付ける
+        tk.Frame.bind(main_frame, "<Configure>", self.on_scroll_content_configure, "+")
+        self.scroll_canvas.bind("<Configure>", self.on_scroll_canvas_configure)
+        self.root.bind_all("<MouseWheel>", self.on_mouse_wheel, "+")
+
+        # 2 列: 左 = 入力と出力、右 = 調整
+        main_frame.grid_columnconfigure(0, weight=1, uniform="col")
+        main_frame.grid_columnconfigure(1, weight=1, uniform="col")
+        # 両列を同じ高さに引き伸ばし、余りは各列の伸縮するカードが吸収する
+        main_frame.grid_rowconfigure(0, weight=1)
+        left_col = ctk.CTkFrame(main_frame, fg_color="transparent", corner_radius=0)
+        left_col.grid(row=0, column=0, sticky="nsew", padx=(20, 6), pady=20)
+        right_col = ctk.CTkFrame(main_frame, fg_color="transparent", corner_radius=0)
+        right_col.grid(row=0, column=1, sticky="nsew", padx=(6, 20), pady=20)
+
+        # 音声の入力（ファイル選択とマイク録音）
+        input_card, _ = self._make_card(left_col, "音声の入力")
+
+        file_row = ctk.CTkFrame(input_card, fg_color="transparent", corner_radius=0)
+        file_row.pack(fill=tk.X, padx=16)
+
+        self.file_btn = ctk.CTkButton(
+            file_row, text="ファイルを選択...", width=124, font=self.font_body,
+            command=self.select_input_file, **OUTLINE_BUTTON_STYLE)
         self.file_btn.pack(side=tk.RIGHT, padx=(10, 0))
 
-        self.file_label = ttk.Label(file_frame, text="ファイルが選択されていません")
+        self.file_label = ctk.CTkLabel(file_row, font=self.font_body, anchor="w")
+        self._set_path_label(self.file_label, "ファイルが選択されていません", placeholder=True)
         self.file_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        # マイク録音
-        record_frame = ttk.LabelFrame(main_frame, text="マイク録音", padding="10")
-        record_frame.pack(fill=tk.X, pady=(0, 10))
+        record_btn_row = ctk.CTkFrame(input_card, fg_color="transparent", corner_radius=0)
+        record_btn_row.pack(fill=tk.X, padx=16, pady=(10, 0))
 
-        record_btn_row = ttk.Frame(record_frame)
-        record_btn_row.pack(fill=tk.X, pady=(0, 5))
+        self.record_start_btn = ctk.CTkButton(
+            record_btn_row, text="録音開始", width=88, font=self.font_body,
+            command=self.start_recording, **OUTLINE_BUTTON_STYLE)
+        self.record_start_btn.pack(side=tk.LEFT, padx=(0, 8))
 
-        self.record_start_btn = ttk.Button(record_btn_row, text="録音開始", command=self.start_recording)
-        self.record_start_btn.pack(side=tk.LEFT, padx=(0, 5))
+        self.record_stop_btn = ctk.CTkButton(
+            record_btn_row, text="停止", width=64, font=self.font_body,
+            command=self.stop_recording, state="disabled", **OUTLINE_BUTTON_STYLE)
+        self.record_stop_btn.pack(side=tk.LEFT, padx=(0, 8))
 
-        self.record_stop_btn = ttk.Button(
-            record_btn_row, text="停止", command=self.stop_recording, state=tk.DISABLED)
-        self.record_stop_btn.pack(side=tk.LEFT, padx=(0, 5))
+        self.record_time_label = ctk.CTkLabel(record_btn_row, text="00:00", font=self.font_body)
+        self.record_time_label.pack(side=tk.LEFT, padx=(8, 0))
 
-        self.record_time_label = ttk.Label(record_btn_row, text="00:00")
-        self.record_time_label.pack(side=tk.LEFT, padx=(10, 0))
+        self.record_level_bar = ctk.CTkProgressBar(input_card, height=6)
+        self._set_bar(self.record_level_bar, 0)
+        self.record_level_bar.pack(fill=tk.X, padx=16, pady=(12, 16))
 
-        self.record_level_bar = ttk.Progressbar(record_frame, mode='determinate', maximum=100)
-        self.record_level_bar.pack(fill=tk.X)
+        # 出力フォルダ選択
+        folder_card, _ = self._make_card(left_col, "出力フォルダ")
+
+        folder_row = ctk.CTkFrame(folder_card, fg_color="transparent", corner_radius=0)
+        folder_row.pack(fill=tk.X, padx=16, pady=(0, 16))
+
+        self.folder_btn = ctk.CTkButton(
+            folder_row, text="フォルダを選択...", width=124, font=self.font_body,
+            command=self.select_output_folder, **OUTLINE_BUTTON_STYLE)
+        self.folder_btn.pack(side=tk.RIGHT, padx=(10, 0))
+
+        self.folder_label = ctk.CTkLabel(folder_row, font=self.font_body, anchor="w")
+        self._set_path_label(self.folder_label, "フォルダが選択されていません", placeholder=True)
+        self.folder_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         # モデル選択（検出されたモデルが2つ以上の場合のみ表示）
         if len(self.available_models) >= 2:
-            model_frame = ttk.LabelFrame(main_frame, text="モデル", padding="10")
-            model_frame.pack(fill=tk.X, pady=(0, 10))
-
-            ttk.Label(model_frame, text="モデル: ").pack(side=tk.LEFT)
-
-            self.model_combo = ttk.Combobox(
-                model_frame, state="readonly", values=self.available_models
-            )
+            model_card, _ = self._make_card(left_col, "モデル")
+            if len(self.available_models) <= MODEL_SEGMENTED_MAX:
+                self.model_combo = ctk.CTkSegmentedButton(
+                    model_card, values=self.available_models, font=self.font_body,
+                    command=self.on_model_selected)
+            else:
+                self.model_combo = ctk.CTkOptionMenu(
+                    model_card, values=self.available_models, font=self.font_body,
+                    dropdown_font=self.font_body, command=self.on_model_selected)
             self.model_combo.set(self.selected_model_name)
-            self.model_combo.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
-            self.model_combo.bind("<<ComboboxSelected>>", self.on_model_selected)
-
-        # 出力フォルダ選択
-        folder_frame = ttk.LabelFrame(main_frame, text="出力フォルダ", padding="10")
-        folder_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        self.folder_btn = ttk.Button(folder_frame, text="選択", command=self.select_output_folder)
-        self.folder_btn.pack(side=tk.RIGHT, padx=(10, 0))
-        
-        self.folder_label = ttk.Label(folder_frame, text="フォルダが選択されていません")
-        self.folder_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        
-        # プログレスバーフレーム
-        progress_frame = ttk.LabelFrame(main_frame, text="処理状況", padding="10")
-        progress_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        self.status_label = ttk.Label(progress_frame, text="待機中...")
-        self.status_label.pack(fill=tk.X, pady=(0, 5))
-        
-        self.progress_bar = ttk.Progressbar(progress_frame, mode='determinate', length=400)
-        self.progress_bar.pack(fill=tk.X, pady=(0, 5))
-        
-        self.progress_detail = ttk.Label(progress_frame, text="")
-        self.progress_detail.pack(fill=tk.X)
-        
-        # 単語登録フレーム
-        hotwords_frame = ttk.LabelFrame(main_frame, text="単語登録（固有名詞・専門用語）", padding="10")
-        hotwords_frame.pack(fill=tk.X, pady=(0, 10))
-
-        # 入力行: テキスト入力 + 追加ボタン
-        input_row = ttk.Frame(hotwords_frame)
-        input_row.pack(fill=tk.X, pady=(0, 5))
-
-        self.hotword_entry = ttk.Entry(input_row)
-        self.hotword_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
-        self.hotword_entry.bind("<Return>", lambda e: self.add_hotword())
-
-        self.add_btn = ttk.Button(input_row, text="追加", width=6, command=self.add_hotword)
-        self.add_btn.pack(side=tk.LEFT, padx=(0, 5))
-
-        self.remove_btn = ttk.Button(input_row, text="削除", width=6, command=self.remove_hotword)
-        self.remove_btn.pack(side=tk.LEFT)
-
-        # 登録数カウンター
-        self.hotwords_count_label = ttk.Label(hotwords_frame, text=f"0 / {MAX_HOTWORDS} 件")
-        self.hotwords_count_label.pack(anchor=tk.E, pady=(0, 3))
-
-        # 登録済み単語リスト
-        list_row = ttk.Frame(hotwords_frame)
-        list_row.pack(fill=tk.X)
-
-        self.hotwords_listbox = tk.Listbox(list_row, height=4, selectmode=tk.EXTENDED)
-        self.hotwords_listbox.pack(side=tk.LEFT, fill=tk.X, expand=True)
-
-        scrollbar = ttk.Scrollbar(list_row, orient=tk.VERTICAL, command=self.hotwords_listbox.yview)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.hotwords_listbox.config(yscrollcommand=scrollbar.set)
-
-        # 出力オプション
-        output_options_frame = ttk.LabelFrame(main_frame, text="出力オプション", padding="10")
-        output_options_frame.pack(fill=tk.X, pady=(0, 10))
-
-        self.output_split_check = ttk.Checkbutton(
-            output_options_frame, text="分割音声 (1分ごと・再生用) も出力",
-            variable=self.output_split_var, command=self.on_output_option_changed
-        )
-        self.output_split_check.pack(anchor=tk.W)
-
-        self.output_txt_check = ttk.Checkbutton(
-            output_options_frame, text="テキスト (.txt) も出力",
-            variable=self.output_txt_var, command=self.on_output_option_changed
-        )
-        self.output_txt_check.pack(anchor=tk.W)
-
-        self.output_srt_check = ttk.Checkbutton(
-            output_options_frame, text="字幕 (.srt) も出力",
-            variable=self.output_srt_var, command=self.on_output_option_changed
-        )
-        self.output_srt_check.pack(anchor=tk.W)
-
-        self.output_docx_check = ttk.Checkbutton(
-            output_options_frame, text="Word (.docx) も出力",
-            variable=self.output_docx_var, command=self.on_output_option_changed
-        )
-        self.output_docx_check.pack(anchor=tk.W)
+            self.model_combo.pack(fill=tk.X, padx=16, pady=(0, 16))
 
         # 認識オプション
-        recog_frame = ttk.LabelFrame(main_frame, text="認識オプション", padding="10")
-        recog_frame.pack(fill=tk.X, pady=(0, 10))
+        # 窓を内容より高くしたとき、左列の下端を右列（単語登録が伸びる）とそろえるため最後のカードも伸ばす
+        recog_card, _ = self._make_card(left_col, "認識オプション", expand=True)
 
-        self.low_quality_check = ttk.Checkbutton(
-            recog_frame, text="低品質音源モード（ノイズ抑制。雑音がひどい音源のみON推奨）",
-            variable=self.low_quality_var, command=self.on_output_option_changed
+        self.low_quality_check = ctk.CTkSwitch(
+            recog_card, text="低品質音源モード（ノイズ抑制）", font=self.font_body,
+            variable=self.low_quality_var, onvalue=True, offvalue=False,
+            command=self.on_output_option_changed
         )
-        self.low_quality_check.pack(anchor=tk.W)
+        self.low_quality_check.pack(anchor=tk.W, padx=16)
+        ctk.CTkLabel(
+            recog_card, text="雑音がひどい音源のみ ON を推奨", font=self.font_note,
+            text_color=NOTE_TEXT_COLOR, height=16, anchor="w"
+        ).pack(anchor=tk.W, padx=(16 + SWITCH_TEXT_OFFSET, 16), pady=(0, 10))
 
-        diarization_text = "話者分離を行う（Excel・Wordに話者を記載。処理時間が延びます）"
+        diarization_text = "話者分離を行う"
         if not self.diarization_model_path:
             diarization_text += "（モデル未導入）"
-        self.diarization_check = ttk.Checkbutton(
-            recog_frame, text=diarization_text,
-            variable=self.diarization_var, command=self.on_output_option_changed
+        self.diarization_check = ctk.CTkSwitch(
+            recog_card, text=diarization_text, font=self.font_body,
+            variable=self.diarization_var, onvalue=True, offvalue=False,
+            command=self.on_output_option_changed
         )
-        self.diarization_check.pack(anchor=tk.W)
+        self.diarization_check.pack(anchor=tk.W, padx=16)
         if not self.diarization_model_path:
-            self.diarization_check.config(state=tk.DISABLED)
+            self.diarization_check.configure(state="disabled")
+        ctk.CTkLabel(
+            recog_card, text="Excel・Word に話者を記載。処理時間が延びます", font=self.font_note,
+            text_color=NOTE_TEXT_COLOR, height=16, anchor="w"
+        ).pack(anchor=tk.W, padx=(16 + SWITCH_TEXT_OFFSET, 16), pady=(0, 16))
 
-        # 実行ボタン・キャンセルボタン
-        button_row = ttk.Frame(main_frame)
-        button_row.pack(pady=10)
+        # 単語登録
+        hotwords_card, hotwords_header = self._make_card(
+            right_col, "単語登録（固有名詞・専門用語）", expand=True)
 
-        self.run_btn = ttk.Button(button_row, text="文字起こし開始", command=self.start_processing)
-        self.run_btn.pack(side=tk.LEFT, padx=(0, 5))
+        self.hotwords_count_label = ctk.CTkLabel(
+            hotwords_header, text=f"0 / {MAX_HOTWORDS} 件", font=self.font_note,
+            text_color=NOTE_TEXT_COLOR)
+        self.hotwords_count_label.pack(side=tk.RIGHT)
 
-        self.cancel_btn = ttk.Button(button_row, text="キャンセル", command=self.cancel_processing, state=tk.DISABLED)
-        self.cancel_btn.pack(side=tk.LEFT)
+        input_row = ctk.CTkFrame(hotwords_card, fg_color="transparent", corner_radius=0)
+        input_row.pack(fill=tk.X, padx=16)
+
+        self.hotword_entry = ctk.CTkEntry(
+            input_row, placeholder_text="単語を入力して Enter または 追加", font=self.font_body)
+        self.hotword_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.hotword_entry.bind("<Return>", lambda e: self.add_hotword())
+
+        self.add_btn = ctk.CTkButton(
+            input_row, text="追加", width=64, font=self.font_body,
+            command=self.add_hotword, **OUTLINE_BUTTON_STYLE)
+        self.add_btn.pack(side=tk.LEFT, padx=(8, 0))
+
+        self.hotwords_list_frame = ctk.CTkScrollableFrame(
+            hotwords_card, height=80, corner_radius=8, fg_color=LIST_FG_COLOR)
+        self.hotwords_list_frame.pack(fill=tk.BOTH, expand=True, padx=16, pady=(10, 16))
+        # 内蔵スクロールバーは既定で高さ 200 を要求し、一覧の height 指定より優先されてしまう。
+        # 公開 API が無いため内部属性で要求高さだけを下げる（表示時は一覧の高さまで伸びる）
+        list_scrollbar = getattr(self.hotwords_list_frame, "_scrollbar", None)
+        if list_scrollbar is not None:
+            list_scrollbar.configure(height=40)
+        else:
+            logger.warning("単語一覧のスクロールバーを取得できませんでした（customtkinter の内部構造が変わった可能性）。"
+                           "一覧の初期高さが大きくなります")
+        self.hotword_rows = []
+
+        # 出力オプション
+        output_card, _ = self._make_card(right_col, "出力オプション")
+
+        output_options = (
+            ("分割音声 (1分ごと・再生用) も出力", self.output_split_var),
+            ("テキスト (.txt) も出力", self.output_txt_var),
+            ("字幕 (.srt) も出力", self.output_srt_var),
+            ("Word (.docx) も出力", self.output_docx_var),
+        )
+        output_checks = []
+        for i, (text, var) in enumerate(output_options):
+            check = ctk.CTkCheckBox(
+                output_card, text=text, font=self.font_body,
+                variable=var, onvalue=True, offvalue=False,
+                command=self.on_output_option_changed
+            )
+            is_last = i == len(output_options) - 1
+            check.pack(anchor=tk.W, padx=16, pady=(0, 16 if is_last else 8))
+            output_checks.append(check)
+        (self.output_split_check, self.output_txt_check,
+         self.output_srt_check, self.output_docx_check) = output_checks
+
+    def _make_card(self, parent, title, expand=False):
+        """角丸のカード（見出し付き）を parent に縦積みし、(カード, 見出し行) を返す。
+
+        expand=True のカードは列の余った高さを吸収する。
+        """
+        top_pad = 12 if parent.pack_slaves() else 0
+        card = ctk.CTkFrame(parent, corner_radius=12, fg_color=CARD_FG_COLOR)
+        if expand:
+            card.pack(fill=tk.BOTH, expand=True, pady=(top_pad, 0))
+        else:
+            card.pack(fill=tk.X, pady=(top_pad, 0))
+        header = ctk.CTkFrame(card, fg_color="transparent", corner_radius=0)
+        header.pack(fill=tk.X, padx=16, pady=(12, 4))
+        ctk.CTkLabel(header, text=title, font=self.font_heading, anchor="w").pack(side=tk.LEFT)
+        return card, header
+
+    @staticmethod
+    def _set_bar(bar, ratio):
+        """プログレスバーを ratio (0..1) にする。0 のときは端の丸い点も見えないよう進捗色を地の色にする"""
+        if ratio <= 0:
+            bar.configure(progress_color=bar.cget("fg_color"))
+        else:
+            bar.configure(progress_color=ctk.ThemeManager.theme["CTkProgressBar"]["progress_color"])
+        bar.set(ratio)
+
+    def _on_appearance_mode_changed(self, mode_string):
+        try:
+            self.scroll_canvas.configure(
+                bg=self.root._apply_appearance_mode(ctk.ThemeManager.theme["CTk"]["fg_color"]))
+        except tk.TclError:
+            pass
+
+    def on_scroll_content_configure(self, event):
+        self.scroll_canvas.configure(scrollregion=self.scroll_canvas.bbox('all'))
+        self.update_scroll_bar_visibility()
+
+    def on_scroll_canvas_configure(self, event):
+        # 窓が内容より高いときは内容を窓の高さまで伸ばし、余りを単語登録の一覧に吸収させる
+        self.scroll_canvas.itemconfigure(
+            self.scroll_window_id, width=event.width,
+            height=max(event.height, self.scroll_content.winfo_reqheight()))
+        self.update_scroll_bar_visibility()
+
+    def is_scroll_content_overflowing(self):
+        return self.scroll_content.winfo_reqheight() > self.scroll_canvas.winfo_height()
+
+    def update_scroll_bar_visibility(self):
+        """内容がはみ出すときだけスクロールバーを表示する"""
+        if self.is_scroll_content_overflowing():
+            if not self.scroll_bar.winfo_manager():
+                self.scroll_bar.pack(side=tk.RIGHT, fill=tk.Y, before=self.scroll_canvas)
+        else:
+            if self.scroll_bar.winfo_manager():
+                self.scroll_bar.pack_forget()
+            self.scroll_canvas.yview_moveto(0)
+
+    def on_mouse_wheel(self, event):
+        if not self.is_scroll_content_overflowing():
+            return
+        widget = event.widget
+        if isinstance(widget, str):
+            try:
+                widget = self.root.nametowidget(widget)
+            except (KeyError, tk.TclError):
+                return
+        widget_path = str(widget)
+
+        def is_within(ancestor):
+            ancestor_path = str(ancestor)
+            return widget_path == ancestor_path or widget_path.startswith(ancestor_path + ".")
+
+        # スクロール領域外（ダイアログ等）と、単語リストが自前でスクロールできるときは対象外
+        if not is_within(self.scroll_canvas):
+            return
+        list_canvas = self.hotwords_list_frame.master
+        if is_within(list_canvas.master) and list_canvas.yview() != (0.0, 1.0):
+            return
+        self.scroll_canvas.yview_scroll(-int(event.delta / 120), 'units')
 
     def cancel_processing(self):
         """処理のキャンセルを要求"""
         self.cancel_event.set()
-        self.cancel_btn.config(state=tk.DISABLED)
-        self.status_label.config(text="キャンセル中...")
+        self.cancel_btn.configure(state="disabled")
+        self.status_label.configure(text="キャンセル中...")
 
     @staticmethod
     def format_mmss(seconds):
@@ -1049,8 +1325,8 @@ class AudioTranscriptionApp:
         if not self.is_recording:
             return
         elapsed = (datetime.datetime.now() - self.record_start_dt).total_seconds()
-        self.record_time_label.config(text=self.format_mmss(elapsed))
-        self.record_level_bar['value'] = self.record_level
+        self.record_time_label.configure(text=self.format_mmss(elapsed))
+        self._set_bar(self.record_level_bar, self.record_level / 100)
         if self.record_error:
             message = self.record_error
             self.record_error = None
@@ -1086,8 +1362,8 @@ class AudioTranscriptionApp:
         self.record_wave_file = None
 
         self.is_recording = False
-        self.record_time_label.config(text="00:00")
-        self.record_level_bar['value'] = 0
+        self.record_time_label.configure(text="00:00")
+        self._set_bar(self.record_level_bar, 0)
         self._set_recording_ui(False)
 
     def stop_recording(self, on_close=False):
@@ -1101,7 +1377,7 @@ class AudioTranscriptionApp:
             return
         self.input_file_paths = [output_path]
         display_path = output_path if len(output_path) < 50 else "..." + output_path[-47:]
-        self.file_label.config(text=display_path)
+        self._set_path_label(self.file_label, display_path, placeholder=False)
         if messagebox.askyesno("録音完了", "録音を保存しました。このまま文字起こしを開始しますか？"):
             self.start_processing()
 
@@ -1118,31 +1394,55 @@ class AudioTranscriptionApp:
                 file_path = self.input_file_paths[0]
                 # 長いパスは省略表示
                 display_path = file_path if len(file_path) < 50 else "..." + file_path[-47:]
-                self.file_label.config(text=display_path)
+                self._set_path_label(self.file_label, display_path, placeholder=False)
             else:
                 first_name = os.path.basename(self.input_file_paths[0])
-                self.file_label.config(
-                    text=f"{len(self.input_file_paths)} 件選択: {first_name} ほか"
+                self._set_path_label(
+                    self.file_label,
+                    f"{len(self.input_file_paths)} 件選択: {first_name} ほか",
+                    placeholder=False,
                 )
-    
+
     def select_output_folder(self):
         folder_path = filedialog.askdirectory(title="出力するフォルダを選択", initialdir='./')
         if folder_path:
             self.output_folder_path = folder_path
             display_path = folder_path if len(folder_path) < 50 else "..." + folder_path[-47:]
-            self.folder_label.config(text=display_path)
-    
+            self._set_path_label(self.folder_label, display_path, placeholder=False)
+
+    @staticmethod
+    def _set_path_label(label, text, placeholder: bool):
+        """パス表示ラベルを更新する（未選択の案内文はプレースホルダー色）"""
+        text_color = PLACEHOLDER_FOREGROUND if placeholder else ctk.ThemeManager.theme["CTkLabel"]["text_color"]
+        label.configure(text=text, text_color=text_color)
+
     def populate_hotwords_listbox(self):
-        """リストボックスに登録済み単語を表示"""
-        self.hotwords_listbox.delete(0, tk.END)
+        """登録済み単語の一覧を 1 単語 1 行で作り直す"""
+        for _word, row, _remove_btn in self.hotword_rows:
+            row.destroy()
+        self.hotword_rows = []
         for word in self.hotwords_list:
-            self.hotwords_listbox.insert(tk.END, word)
+            self._add_hotword_row(word)
         self.update_hotwords_count()
+
+    def _add_hotword_row(self, word):
+        """単語 1 つ分の行（単語 + 右端の削除ボタン）を一覧の末尾に足す"""
+        row = ctk.CTkFrame(self.hotwords_list_frame, fg_color="transparent", corner_radius=0)
+        row.pack(fill=tk.X, padx=(6, 0), pady=1)
+        remove_btn = ctk.CTkButton(
+            row, text="✕", width=28, height=24, font=self.font_body,
+            fg_color="transparent", text_color=NOTE_TEXT_COLOR,
+            command=lambda w=word: self.remove_hotword(w),
+            state="disabled" if self.is_processing else "normal")
+        remove_btn.pack(side=tk.RIGHT)
+        ctk.CTkLabel(row, text=word, font=self.font_body, height=24, anchor="w").pack(
+            side=tk.LEFT, fill=tk.X, expand=True)
+        self.hotword_rows.append((word, row, remove_btn))
 
     def update_hotwords_count(self):
         """登録数カウンターを更新"""
         count = len(self.hotwords_list)
-        self.hotwords_count_label.config(text=f"{count} / {MAX_HOTWORDS} 件")
+        self.hotwords_count_label.configure(text=f"{count} / {MAX_HOTWORDS} 件")
 
     def add_hotword(self):
         """単語を追加"""
@@ -1161,23 +1461,20 @@ class AudioTranscriptionApp:
             return
         self.hotwords_list.append(word)
         save_hotwords(self.hotwords_list)
-        self.hotwords_listbox.insert(tk.END, word)
+        self._add_hotword_row(word)
         self.hotword_entry.delete(0, tk.END)
         self.update_hotwords_count()
+        # 追加した行が見えるよう一覧の末尾までスクロールする
+        self.root.update_idletasks()
+        self.hotwords_list_frame.master.yview_moveto(1.0)
 
-    def remove_hotword(self):
-        """選択した単語を削除"""
-        selected = self.hotwords_listbox.curselection()
-        if not selected:
-            messagebox.showinfo("情報", "削除する単語を選択してください。")
+    def remove_hotword(self, word):
+        """指定した単語を削除"""
+        if word not in self.hotwords_list:
             return
-        # 逆順で削除（インデックスずれ防止）
-        for idx in reversed(selected):
-            word = self.hotwords_listbox.get(idx)
-            self.hotwords_list.remove(word)
-            self.hotwords_listbox.delete(idx)
+        self.hotwords_list.remove(word)
         save_hotwords(self.hotwords_list)
-        self.update_hotwords_count()
+        self.populate_hotwords_listbox()
 
     def get_hotwords_string(self):
         """登録済み単語をhotwordsパラメータ用の文字列に変換"""
@@ -1204,40 +1501,41 @@ class AudioTranscriptionApp:
     def update_progress(self, current, total, status_text, detail_text=""):
         """プログレスバーと状態表示を更新"""
         progress_value = (current / total) * 100 if total > 0 else 0
-        self.progress_bar['value'] = progress_value
-        self.status_label.config(text=status_text)
-        self.progress_detail.config(text=detail_text)
+        self._set_bar(self.progress_bar, progress_value / 100)
+        self.status_label.configure(text=status_text)
+        self.progress_detail.configure(text=detail_text)
         self.root.update_idletasks()
-    
+
     def set_ui_state(self, enabled):
         """UIの有効/無効を切り替え"""
         state = tk.NORMAL if enabled else tk.DISABLED
-        self.file_btn.config(state=state)
-        self.folder_btn.config(state=state)
-        self.run_btn.config(state=state)
-        self.add_btn.config(state=state)
-        self.remove_btn.config(state=state)
-        self.hotword_entry.config(state=state)
-        self.output_split_check.config(state=state)
-        self.output_txt_check.config(state=state)
-        self.output_srt_check.config(state=state)
-        self.output_docx_check.config(state=state)
-        self.low_quality_check.config(state=state)
+        self.file_btn.configure(state=state)
+        self.folder_btn.configure(state=state)
+        self.run_btn.configure(state=state)
+        self.add_btn.configure(state=state)
+        for _word, _row, remove_btn in self.hotword_rows:
+            remove_btn.configure(state=state)
+        self.hotword_entry.configure(state=state)
+        self.output_split_check.configure(state=state)
+        self.output_txt_check.configure(state=state)
+        self.output_srt_check.configure(state=state)
+        self.output_docx_check.configure(state=state)
+        self.low_quality_check.configure(state=state)
         if self.diarization_model_path:
-            self.diarization_check.config(state=state)
+            self.diarization_check.configure(state=state)
         if hasattr(self, "model_combo"):
-            self.model_combo.config(state="readonly" if enabled else tk.DISABLED)
-        self.cancel_btn.config(state=tk.DISABLED if enabled else tk.NORMAL)
-        self.record_start_btn.config(state=tk.DISABLED if (not enabled or self.is_recording) else tk.NORMAL)
+            self.model_combo.configure(state=state)
+        self.cancel_btn.configure(state=tk.DISABLED if enabled else tk.NORMAL)
+        self.record_start_btn.configure(state=tk.DISABLED if (not enabled or self.is_recording) else tk.NORMAL)
 
     def _set_recording_ui(self, recording):
         """録音中は入力ファイル選択・出力フォルダ選択・文字起こし開始を無効化する"""
         lock_state = tk.DISABLED if recording else tk.NORMAL
-        self.file_btn.config(state=lock_state)
-        self.folder_btn.config(state=lock_state)
-        self.run_btn.config(state=lock_state)
-        self.record_start_btn.config(state=tk.DISABLED if recording else tk.NORMAL)
-        self.record_stop_btn.config(state=tk.NORMAL if recording else tk.DISABLED)
+        self.file_btn.configure(state=lock_state)
+        self.folder_btn.configure(state=lock_state)
+        self.run_btn.configure(state=lock_state)
+        self.record_start_btn.configure(state=tk.DISABLED if recording else tk.NORMAL)
+        self.record_stop_btn.configure(state=tk.NORMAL if recording else tk.DISABLED)
 
     def start_processing(self):
         if self.is_recording:

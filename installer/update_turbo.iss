@@ -8,10 +8,10 @@
 ; （フル版のアンインストール登録を壊さないため）。
 ;
 ; ビルド例:
-;   ISCC.exe /DAppVersion=1.6.0 /DSourceDir=..\dist\TND_AudioTranscription_turbo_v1.6.0 update_turbo.iss
+;   ISCC.exe /DAppVersion=1.7.0 /DSourceDir=..\dist\TND_AudioTranscription_turbo_v1.7.0 update_turbo.iss
 ;
 #ifndef AppVersion
-  #define AppVersion "1.6.0"
+  #define AppVersion "1.7.0"
 #endif
 #ifndef SourceDir
   #define SourceDir "..\dist\TND_AudioTranscription_turbo_v" + AppVersion
@@ -51,6 +51,8 @@ Name: "japanese"; MessagesFile: "compiler:Languages\Japanese.isl"
 ; PyInstaller onedir 出力一式（本体EXE + _internal\）
 Source: "{#SourceDir}\app\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 Source: "{#SourceDir}\README.txt"; DestDir: "{app}"; Flags: ignoreversion
+; 同梱ライブラリのライセンス全文（BSD/MIT の添付条件）。相対パスはこの .iss のフォルダ基準
+Source: "..\THIRD_PARTY_LICENSES.txt"; DestDir: "{app}"; Flags: ignoreversion
 ; 話者分離モデル（v1.6.0 新規追加。models本体3GB級は差分更新の対象外という
 ; 既存の方針を踏襲するが、models_diarizationは新規追加物のため含める）
 Source: "{#SourceDir}\models_diarization\*"; DestDir: "{app}\models_diarization"; Flags: recursesubdirs createallsubdirs ignoreversion nocompression

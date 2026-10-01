@@ -8,6 +8,8 @@ datas = [
 ]
 # pyannote.audio.telemetry.config.yaml 等の非.pyデータ（collect_submodulesでは拾えない）
 datas += collect_data_files('pyannote.audio')
+# customtkinter のテーマ JSON・図形描画用フォント・アイコン（assets 配下。無いと起動時に落ちる）
+datas += collect_data_files('customtkinter')
 
 # pyannote.audio は config.yaml に書かれたクラス名（文字列）を importlib で動的に
 # 解決するため、静的解析だけでは辿れないモジュールがある。関連パッケージは
