@@ -4,6 +4,8 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
+![TND AI議事録アプリの画面（v1.7.2、ライトモード）](docs/images/app_screenshot.png)
+
 ---
 
 ## 📌 特徴
