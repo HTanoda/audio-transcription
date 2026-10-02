@@ -1,6 +1,6 @@
-# ビルド手順書 (v1.7.2)
+# ビルド手順書 (v1.7.3)
 
-このドキュメントでは、音声文字起こしアプリ v1.7.2 の配布用パッケージをビルドする手順を説明します。
+このドキュメントでは、音声文字起こしアプリ v1.7.3 の配布用パッケージをビルドする手順を説明します。
 
 v1.6.0 から話者分離（pyannote.audio + PyTorch CPU）とマイク録音（sounddevice）が追加され、
 ビルド構成が大きく変わりました。v1.5.0 以前との主な違い:
@@ -184,7 +184,7 @@ Inno Setup の入力ソースとなる、バージョン別の配布用フォル
 onedir 出力は `app\` サブフォルダに丸ごと格納します。
 
 ```powershell
-$v = "1.7.2"
+$v = "1.7.3"
 
 # ---- 標準版 ----
 New-Item -ItemType Directory -Path "dist\TND_AudioTranscription_v$v\app" -Force
@@ -218,7 +218,7 @@ Copy-Item -Recurse "models_diarization" "dist\TND_AudioTranscription_turbo_v$v\m
 完成形（v1.6.0 実測: 標準 約3.7GB / Turbo 約2.3GB）:
 
 ```
-TND_AudioTranscription_v1.7.2/
+TND_AudioTranscription_v1.7.3/
   ├── app/                            # onedir 出力（EXE + _internal\、約770MB）
   │   ├── TND_audio_transcription.exe
   │   └── _internal/
@@ -241,7 +241,7 @@ Step 4 で組み立てた配布用フォルダを入力として、`installer\bu
 
 ```powershell
 cd installer
-.\build_installers.ps1 -Version 1.7.2
+.\build_installers.ps1 -Version 1.7.3
 ```
 
 既定では以下のフォルダをソースとして参照します（`-StandardDir` / `-TurboDir` で明示指定も可能）:
@@ -253,10 +253,10 @@ cd installer
 
 ```
 dist\
-  ├── TND_AudioTranscription-setup-1.7.2.exe          # 標準版フル（約3.2GB）
-  ├── TND_AudioTranscription-update-1.7.2.exe         # 標準版差分更新（約234MB）
-  ├── TND_AudioTranscription_turbo-setup-1.7.2.exe     # Turbo版フル（約1.8GB）
-  └── TND_AudioTranscription_turbo-update-1.7.2.exe    # Turbo版差分更新（約234MB）
+  ├── TND_AudioTranscription-setup-1.7.3.exe          # 標準版フル（約3.2GB）
+  ├── TND_AudioTranscription-update-1.7.3.exe         # 標準版差分更新（約234MB）
+  ├── TND_AudioTranscription_turbo-setup-1.7.3.exe     # Turbo版フル（約1.8GB）
+  └── TND_AudioTranscription_turbo-update-1.7.3.exe    # Turbo版差分更新（約234MB）
 ```
 
 インストーラーの [Files] 構成（v1.6.0〜）:
@@ -266,6 +266,7 @@ dist\
   **models（3GB級）は含めない**のが従来からの方針。models_diarization は
   v1.6.0 の新規追加物のため update にも含める（v1.5.0 からの更新で話者分離を使えるように）。
   update 版の本体が約115MB→234MB に増えたのは onedir 化で torch 等を同梱するため
+- update もショートカット (スタートメニュー常時、デスクトップはタスクで選択) と .ico を作成・同梱する (v1.7.3〜)
 
 ### Step 6: サイレントインストール実機検証（出荷ゲート）
 
@@ -277,7 +278,7 @@ Turbo版フルインストーラーで install → selftest → 起動 → unins
 
 ```powershell
 # サイレントインストール
-Start-Process -FilePath "dist\TND_AudioTranscription_turbo-setup-1.7.2.exe" `
+Start-Process -FilePath "dist\TND_AudioTranscription_turbo-setup-1.7.3.exe" `
   -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" -Wait
 
 # インストール先でセルフテスト（終了コード 0 / RESULT: ALL_OK を確認）

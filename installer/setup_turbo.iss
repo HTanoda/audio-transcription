@@ -5,10 +5,10 @@
 ; 話者分離モデル（models_diarization）も同梱する。
 ;
 ; ビルド例:
-;   ISCC.exe /DAppVersion=1.7.2 /DSourceDir=..\dist\TND_AudioTranscription_turbo_v1.7.2 setup_turbo.iss
+;   ISCC.exe /DAppVersion=1.7.3 /DSourceDir=..\dist\TND_AudioTranscription_turbo_v1.7.3 setup_turbo.iss
 ;
 #ifndef AppVersion
-  #define AppVersion "1.7.2"
+  #define AppVersion "1.7.3"
 #endif
 #ifndef SourceDir
   #define SourceDir "..\dist\TND_AudioTranscription_turbo_v" + AppVersion

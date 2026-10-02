@@ -6,7 +6,7 @@
     4本を ISCC.exe でビルドし、dist フォルダに出力する。
     Windows PowerShell 5.1 互換（&& / ?? は使用しない）。
 .PARAMETER Version
-    ビルド対象のアプリバージョン（既定: 1.7.2）
+    ビルド対象のアプリバージョン（既定: 1.7.3）
 .PARAMETER StandardDir
     標準版の配布用ソースフォルダ（既定: ..\dist\TND_AudioTranscription_v<Version>）
 .PARAMETER TurboDir
@@ -14,10 +14,10 @@
 .EXAMPLE
     .\build_installers.ps1
 .EXAMPLE
-    .\build_installers.ps1 -Version 1.7.2 -StandardDir "..\dist\TND_AudioTranscription_v1.7.2" -TurboDir "..\dist\TND_AudioTranscription_turbo_v1.7.2"
+    .\build_installers.ps1 -Version 1.7.3 -StandardDir "..\dist\TND_AudioTranscription_v1.7.3" -TurboDir "..\dist\TND_AudioTranscription_turbo_v1.7.3"
 #>
 param(
-    [string]$Version = "1.7.2",
+    [string]$Version = "1.7.3",
     [string]$StandardDir = "",
     [string]$TurboDir = ""
 )

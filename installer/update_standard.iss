@@ -8,10 +8,10 @@
 ; （フル版のアンインストール登録を壊さないため）。
 ;
 ; ビルド例:
-;   ISCC.exe /DAppVersion=1.7.2 /DSourceDir=..\dist\TND_AudioTranscription_v1.7.2 update_standard.iss
+;   ISCC.exe /DAppVersion=1.7.3 /DSourceDir=..\dist\TND_AudioTranscription_v1.7.3 update_standard.iss
 ;
 #ifndef AppVersion
-  #define AppVersion "1.7.2"
+  #define AppVersion "1.7.3"
 #endif
 #ifndef SourceDir
   #define SourceDir "..\dist\TND_AudioTranscription_v" + AppVersion
@@ -19,6 +19,7 @@
 
 #define MyAppName      "TND AI議事録アプリ"
 #define MyAppExeName   "TND_audio_transcription.exe"
+#define MyAppIcoName   "TND_AudioTranscription01.ico"
 #define MyAppPublisher "HIROKI TANODA (TND)"
 #define MyAppCopyright "Copyright (c) 2026 HIROKI TANODA (TND)"
 
@@ -30,6 +31,7 @@ AppPublisher={#MyAppPublisher}
 AppCopyright={#MyAppCopyright}
 DefaultDirName={localappdata}\TND_AudioTranscription
 DisableDirPage=no
+DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 DisableReadyPage=yes
 OutputDir=..\dist
@@ -47,15 +49,26 @@ RestartApplications=no
 [Languages]
 Name: "japanese"; MessagesFile: "compiler:Languages\Japanese.isl"
 
+[Tasks]
+; フル版と同じ。差分更新だけを入れた PC (フル版未導入) でもショートカットを作れるようにする (v1.7.3)
+Name: "desktopicon"; Description: "デスクトップにショートカットを作成"; GroupDescription: "追加アイコン:"
+
 [Files]
 ; PyInstaller onedir 出力一式（本体EXE + _internal\）
 Source: "{#SourceDir}\app\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 Source: "{#SourceDir}\README.txt"; DestDir: "{app}"; Flags: ignoreversion
+; ショートカット用アイコン（フル版と同じ）
+Source: "{#SourceDir}\{#MyAppIcoName}"; DestDir: "{app}"; Flags: ignoreversion
 ; 同梱ライブラリのライセンス全文（BSD/MIT の添付条件）。相対パスはこの .iss のフォルダ基準
 Source: "..\THIRD_PARTY_LICENSES.txt"; DestDir: "{app}"; Flags: ignoreversion
 ; 話者分離モデル（v1.6.0 新規追加。models本体3GB級は差分更新の対象外という
 ; 既存の方針を踏襲するが、models_diarizationは新規追加物のため含める）
 Source: "{#SourceDir}\models_diarization\*"; DestDir: "{app}\models_diarization"; Flags: recursesubdirs createallsubdirs ignoreversion nocompression
+
+[Icons]
+; フル版と同じ名前・参照先で作る（既存のショートカットは同じ内容で上書きされるだけ）
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppIcoName}"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppIcoName}"; Tasks: desktopicon
 
 [Code]
 function NextButtonClick(CurPageID: Integer): Boolean;

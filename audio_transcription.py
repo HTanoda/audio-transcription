@@ -38,7 +38,7 @@ from faster_whisper.audio import decode_audio
 
 # アプリケーション情報
 APP_NAME = "TND_AudioTranscription"
-APP_VERSION = "1.7.2"
+APP_VERSION = "1.7.3"
 APP_TITLE = f"TND audio_transcription v{APP_VERSION}"
 APP_ICON_NAME = "TND_AudioTranscription01.ico"
 
